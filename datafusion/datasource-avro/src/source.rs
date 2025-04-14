@@ -19,47 +19,50 @@
 
 use std::any::Any;
 use std::fmt::Formatter;
+use std::io::{BufReader};
 use std::sync::Arc;
 
-use crate::avro_to_arrow::Reader as AvroReader;
+use datafusion_common::error::{Result};
+use datafusion_datasource::decoder::{deserialize_stream, DecoderDeserializer};
+use datafusion_datasource::file_meta::FileMeta;
+use datafusion_datasource::file_stream::{FileOpenFuture, FileOpener};
+use datafusion_physical_plan::{ExecutionPlan};
 
-use datafusion_common::error::Result;
+use arrow::avro::ReaderBuilder;
+use arrow::{datatypes::SchemaRef};
 
-use arrow::datatypes::SchemaRef;
+use crate::file_format::AvroDecoder;
+
 use datafusion_common::{Constraints, Statistics};
 use datafusion_datasource::file::FileSource;
 use datafusion_datasource::file_scan_config::FileScanConfig;
-use datafusion_datasource::file_stream::FileOpener;
 use datafusion_datasource::source::DataSourceExec;
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion_physical_expr_common::sort_expr::LexOrdering;
 use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion_physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
-use datafusion_physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
-};
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PlanProperties};
 
-use object_store::ObjectStore;
+use futures::{StreamExt};
+use object_store::{GetResultPayload, ObjectStore};
 
 /// Execution plan for scanning Avro data source
+/// Datafusion calls for an exec and execution plan (physical plan) for each file type
+/// Needs a file opener
+
 #[derive(Debug, Clone)]
 #[deprecated(since = "46.0.0", note = "use DataSourceExec instead")]
 pub struct AvroExec {
     inner: DataSourceExec,
-    base_config: FileScanConfig,
+    base_config: FileScanConfig
 }
-
 #[allow(unused, deprecated)]
 impl AvroExec {
-    /// Create a new Avro reader execution plan provided base configurations
+    // Create a new Avro reader execution plan provided base configurations
     pub fn new(base_config: FileScanConfig) -> Self {
-        let (
-            projected_schema,
-            projected_constraints,
-            projected_statistics,
-            projected_output_ordering,
-        ) = base_config.project();
+        let (projected_schema, projected_constraints, projected_statistics, projected_output_ordering) =
+            base_config.project();
         let cache = Self::compute_properties(
             Arc::clone(&projected_schema),
             &projected_output_ordering,
@@ -73,7 +76,6 @@ impl AvroExec {
         }
     }
 
-    /// Ref to the base configs
     pub fn base_config(&self) -> &FileScanConfig {
         &self.base_config
     }
@@ -106,8 +108,11 @@ impl DisplayAs for AvroExec {
     }
 }
 
+/// Implement the ExecutionPlan trait for AvroExec
 #[allow(unused, deprecated)]
 impl ExecutionPlan for AvroExec {
+    // Wraps DataSourceExec methods
+
     fn name(&self) -> &'static str {
         "AvroExec"
     }
@@ -115,18 +120,31 @@ impl ExecutionPlan for AvroExec {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema()
+    }
 
     fn properties(&self) -> &PlanProperties {
         self.inner.properties()
     }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         Vec::new()
     }
+
     fn with_new_children(
         self: Arc<Self>,
         _: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(self)
+    }
+
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        config: &datafusion_common::config::ConfigOptions,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        self.inner.repartitioned(target_partitions, config)
     }
 
     fn execute(
@@ -152,7 +170,45 @@ impl ExecutionPlan for AvroExec {
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
         self.inner.with_fetch(limit)
     }
+
 }
+
+/// A [`FileOpener`] that opens an Avro file and yields a [`FileOpenFuture`]
+pub struct AvroOpener {
+    pub object_store: Arc<dyn ObjectStore>,
+}
+
+impl FileOpener for AvroOpener {
+    // This is where the actual file gets opened and read, returning a future with a RecordBatch
+    fn open(&self, file_meta: FileMeta) -> Result<FileOpenFuture> {
+        let object_store = Arc::clone(&self.object_store);
+        Ok(Box::pin(async move {
+            let result = object_store.get(file_meta.location()).await?;
+            match result.payload {
+                // handle the file
+                GetResultPayload::File(mut file, _) => {
+                    let reader = ReaderBuilder::new()
+                        .build(BufReader::new(file))?;
+                    Ok(futures::stream::iter(reader).boxed())
+                }
+                // handle the stream
+                GetResultPayload::Stream(s) => {
+                    // Use the decoder directly
+                    let data = result.bytes().await?;
+
+                    let decoder = ReaderBuilder::new()
+                        .build_decoder(BufReader::new(data.reader()))?;
+
+                    Ok(deserialize_stream(
+                        s,
+                        DecoderDeserializer::new(AvroDecoder::new(decoder)),
+                    ))
+                }
+            }
+        }))
+    }
+}
+
 
 /// AvroSource holds the extra configuration that is necessary for opening avro files
 #[derive(Clone, Default)]
@@ -169,15 +225,6 @@ impl AvroSource {
     pub fn new() -> Self {
         Self::default()
     }
-
-    fn open<R: std::io::Read>(&self, reader: R) -> Result<AvroReader<'static, R>> {
-        AvroReader::try_new(
-            reader,
-            Arc::clone(self.schema.as_ref().expect("Schema must set before open")),
-            self.batch_size.expect("Batch size must set before open"),
-            self.projection.clone(),
-        )
-    }
 }
 
 impl FileSource for AvroSource {
@@ -187,8 +234,7 @@ impl FileSource for AvroSource {
         _base_config: &FileScanConfig,
         _partition: usize,
     ) -> Arc<dyn FileOpener> {
-        Arc::new(private::AvroOpener {
-            config: Arc::new(self.clone()),
+        Arc::new(AvroOpener {
             object_store,
         })
     }
@@ -208,18 +254,16 @@ impl FileSource for AvroSource {
         conf.schema = Some(schema);
         Arc::new(conf)
     }
-    fn with_statistics(&self, statistics: Statistics) -> Arc<dyn FileSource> {
-        let mut conf = self.clone();
-        conf.projected_statistics = Some(statistics);
-        Arc::new(conf)
-    }
-
     fn with_projection(&self, config: &FileScanConfig) -> Arc<dyn FileSource> {
         let mut conf = self.clone();
         conf.projection = config.projected_file_column_names();
         Arc::new(conf)
     }
-
+    fn with_statistics(&self, statistics: Statistics) -> Arc<dyn FileSource> {
+        let mut conf = self.clone();
+        conf.projected_statistics = Some(statistics);
+        Arc::new(conf)
+    }
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.metrics
     }
@@ -235,48 +279,11 @@ impl FileSource for AvroSource {
         "avro"
     }
 
-    fn repartitioned(
-        &self,
-        _target_partitions: usize,
-        _repartition_file_min_size: usize,
-        _output_ordering: Option<LexOrdering>,
-        _config: &FileScanConfig,
-    ) -> Result<Option<FileScanConfig>> {
-        Ok(None)
-    }
 }
 
-mod private {
-    use super::*;
+// Implement avro exec
+// Implement avro opener
+// Implement file opener for avro opener
 
-    use bytes::Buf;
-    use datafusion_datasource::{file_meta::FileMeta, file_stream::FileOpenFuture};
-    use futures::StreamExt;
-    use object_store::{GetResultPayload, ObjectStore};
-
-    pub struct AvroOpener {
-        pub config: Arc<AvroSource>,
-        pub object_store: Arc<dyn ObjectStore>,
-    }
-
-    impl FileOpener for AvroOpener {
-        fn open(&self, file_meta: FileMeta) -> Result<FileOpenFuture> {
-            let config = Arc::clone(&self.config);
-            let object_store = Arc::clone(&self.object_store);
-            Ok(Box::pin(async move {
-                let r = object_store.get(file_meta.location()).await?;
-                match r.payload {
-                    GetResultPayload::File(file, _) => {
-                        let reader = config.open(file)?;
-                        Ok(futures::stream::iter(reader).boxed())
-                    }
-                    GetResultPayload::Stream(_) => {
-                        let bytes = r.bytes().await?;
-                        let reader = config.open(bytes.reader())?;
-                        Ok(futures::stream::iter(reader).boxed())
-                    }
-                }
-            }))
-        }
-    }
-}
+// File opener will hold the ReaderBuilder from arrow-rs in the file reader portion
+// File opener will also hold the Decoder from arrow-rs for the stream handler portion

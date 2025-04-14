@@ -1,49 +1,27 @@
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
-
-//! Apache Avro [`FileFormat`] abstractions
-
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
+use std::io::BufReader;
 use std::sync::Arc;
-
-use crate::avro_to_arrow::read_avro_schema_from_reader;
-use crate::source::AvroSource;
-
-use arrow::datatypes::Schema;
-use arrow::datatypes::SchemaRef;
-use datafusion_common::internal_err;
+use arrow::array::RecordBatch;
+use arrow::avro;
+use arrow::avro::ReaderBuilder;
+use arrow::datatypes::{Schema, SchemaRef};
+use arrow::error::ArrowError;
+use object_store::{GetResultPayload, ObjectMeta, ObjectStore};
+use datafusion_common::{internal_err, GetExt, Statistics, DEFAULT_AVRO_EXTENSION, Result};
 use datafusion_common::parsers::CompressionTypeVariant;
-use datafusion_common::GetExt;
-use datafusion_common::DEFAULT_AVRO_EXTENSION;
-use datafusion_common::{Result, Statistics};
+use datafusion_datasource::decoder::Decoder;
 use datafusion_datasource::file::FileSource;
 use datafusion_datasource::file_compression_type::FileCompressionType;
 use datafusion_datasource::file_format::{FileFormat, FileFormatFactory};
 use datafusion_datasource::file_scan_config::{FileScanConfig, FileScanConfigBuilder};
 use datafusion_datasource::source::DataSourceExec;
-use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr_common::physical_expr::PhysicalExpr;
 use datafusion_physical_plan::ExecutionPlan;
 use datafusion_session::Session;
 
-use async_trait::async_trait;
-use object_store::{GetResultPayload, ObjectMeta, ObjectStore};
-
+use crate::source::AvroSource;
 #[derive(Default)]
 /// Factory struct used to create [`AvroFormat`]
 pub struct AvroFormatFactory;
@@ -90,16 +68,13 @@ impl GetExt for AvroFormatFactory {
 #[derive(Default, Debug)]
 pub struct AvroFormat;
 
-#[async_trait]
 impl FileFormat for AvroFormat {
     fn as_any(&self) -> &dyn Any {
         self
     }
-
     fn get_ext(&self) -> String {
         AvroFormatFactory::new().get_ext()
     }
-
     fn get_ext_with_compression(
         &self,
         file_compression_type: &FileCompressionType,
@@ -110,7 +85,7 @@ impl FileFormat for AvroFormat {
             _ => internal_err!("Avro FileFormat does not support compression."),
         }
     }
-
+    // Error: Lifetimes do not match method in trait
     async fn infer_schema(
         &self,
         _state: &dyn Session,
@@ -122,20 +97,26 @@ impl FileFormat for AvroFormat {
             let r = store.as_ref().get(&object.location).await?;
             let schema = match r.payload {
                 GetResultPayload::File(mut file, _) => {
-                    read_avro_schema_from_reader(&mut file)?
+                    // read schema from file
+                    let reader = ReaderBuilder::new()
+                        .build(BufReader::new(&mut file))?;
+                    Ok(reader.schema())
                 }
-                GetResultPayload::Stream(_) => {
-                    // TODO: Fetching entire file to get schema is potentially wasteful
-                    let data = r.bytes().await?;
-                    read_avro_schema_from_reader(&mut data.as_ref())?
+                GetResultPayload::Stream(s) => {
+                    // Need to get a ReaderBuilder instance from the stream and use that to get the schema
+
+                    // This is failing because the BufReader::new(s) is invalid for build_decoder
+                    let reader = ReaderBuilder::new()
+                        .build_decoder(BufReader::new(s))?;
+                    Ok(reader.schema())
                 }
             };
-            schemas.push(schema);
+            schemas.push(schema?);
         }
-        let merged_schema = Schema::try_merge(schemas)?;
+        let merged_schema = Schema::try_merge(schemas.clone())?;
         Ok(Arc::new(merged_schema))
     }
-
+    // Error: Lifetimes do not match method in trait
     async fn infer_stats(
         &self,
         _state: &dyn Session,
@@ -145,7 +126,7 @@ impl FileFormat for AvroFormat {
     ) -> Result<Statistics> {
         Ok(Statistics::new_unknown(&table_schema))
     }
-
+    // Error: Lifetimes do not match method in trait
     async fn create_physical_plan(
         &self,
         _state: &dyn Session,
@@ -160,5 +141,30 @@ impl FileFormat for AvroFormat {
 
     fn file_source(&self) -> Arc<dyn FileSource> {
         Arc::new(AvroSource::new())
+    }
+}
+
+#[derive(Debug)]
+pub struct AvroDecoder {
+    inner: avro::reader::Decoder,
+}
+
+impl AvroDecoder {
+    pub fn new(decoder: avro::reader::Decoder) -> Self {
+        Self { inner: decoder }
+    }
+}
+
+impl Decoder for AvroDecoder {
+    fn decode(&mut self, buf: &[u8]) -> Result<usize, ArrowError> {
+        self.inner.decode(buf)
+    }
+
+    fn flush(&mut self) -> Result<Option<RecordBatch>, ArrowError> {
+        self.inner.flush()
+    }
+
+    fn can_flush_early(&self) -> bool {
+        false
     }
 }

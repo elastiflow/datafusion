@@ -247,10 +247,11 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 [[package]]
 name = "arrow"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "arrow-arith",
  "arrow-array",
+ "arrow-avro",
  "arrow-buffer",
  "arrow-cast",
  "arrow-csv",
@@ -270,7 +271,7 @@ dependencies = [
 [[package]]
 name = "arrow-arith"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -283,7 +284,7 @@ dependencies = [
 [[package]]
 name = "arrow-array"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "ahash 0.8.11",
  "arrow-buffer",
@@ -297,9 +298,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-avro"
+version = "54.3.1"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-schema",
+ "bzip2 0.4.4",
+ "crc",
+ "flate2",
+ "serde",
+ "serde_json",
+ "snap",
+ "xz",
+ "zstd",
+]
+
+[[package]]
 name = "arrow-buffer"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "bytes",
  "half",
@@ -309,7 +329,7 @@ dependencies = [
 [[package]]
 name = "arrow-cast"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -329,7 +349,7 @@ dependencies = [
 [[package]]
 name = "arrow-csv"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "arrow-array",
  "arrow-cast",
@@ -344,7 +364,7 @@ dependencies = [
 [[package]]
 name = "arrow-data"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "arrow-buffer",
  "arrow-schema",
@@ -355,7 +375,7 @@ dependencies = [
 [[package]]
 name = "arrow-flight"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "arrow-arith",
  "arrow-array",
@@ -381,7 +401,7 @@ dependencies = [
 [[package]]
 name = "arrow-ipc"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -394,7 +414,7 @@ dependencies = [
 [[package]]
 name = "arrow-json"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -413,7 +433,7 @@ dependencies = [
 [[package]]
 name = "arrow-ord"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -425,7 +445,7 @@ dependencies = [
 [[package]]
 name = "arrow-row"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -437,7 +457,7 @@ dependencies = [
 [[package]]
 name = "arrow-schema"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "bitflags 2.8.0",
  "serde",
@@ -446,7 +466,7 @@ dependencies = [
 [[package]]
 name = "arrow-select"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "ahash 0.8.11",
  "arrow-array",
@@ -459,7 +479,7 @@ dependencies = [
 [[package]]
 name = "arrow-string"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -1608,6 +1628,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc"
+version = "3.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e6e4d7b33a94f0991c26729976b10ebde1d34c3ee82408fb536164fa10d636"
+dependencies = [
+ "crc-catalog",
+]
+
+[[package]]
+name = "crc-catalog"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
+
+[[package]]
 name = "crc32fast"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2035,10 +2070,6 @@ version = "46.0.1"
 dependencies = [
  "apache-avro",
  "arrow",
- "async-trait",
- "bytes",
- "chrono",
- "datafusion-catalog",
  "datafusion-common",
  "datafusion-datasource",
  "datafusion-execution",
@@ -2047,11 +2078,9 @@ dependencies = [
  "datafusion-physical-plan",
  "datafusion-session",
  "futures",
- "num-traits",
  "object_store",
  "rstest",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -4349,7 +4378,7 @@ dependencies = [
 [[package]]
 name = "parquet"
 version = "54.3.1"
-source = "git+https://github.com/elastiflow/arrow-rs.git?rev=de41e337f773a7efe484d561e097462cac3c6dd8#de41e337f773a7efe484d561e097462cac3c6dd8"
+source = "git+https://github.com/elastiflow/arrow-rs.git?rev=ee0a61a09bdcfb66682ad39d48107fde65ca1287#ee0a61a09bdcfb66682ad39d48107fde65ca1287"
 dependencies = [
  "ahash 0.8.11",
  "arrow-array",
@@ -7351,6 +7380,15 @@ name = "xmlparser"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
+
+[[package]]
+name = "xz"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c887690ff2a2e233e8e49633461521f98ec57fbff9d59a884c9a4f04ec1da34"
+dependencies = [
+ "xz2",
+]
 
 [[package]]
 name = "xz2"

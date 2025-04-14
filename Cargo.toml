@@ -215,12 +215,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tarpaulin)"] }
 unused_qualifications = "deny"
 
 [patch.crates-io]
-arrow = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "de41e337f773a7efe484d561e097462cac3c6dd8" }
-arrow-buffer = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "de41e337f773a7efe484d561e097462cac3c6dd8" }
-arrow-flight = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "de41e337f773a7efe484d561e097462cac3c6dd8" }
-arrow-ipc = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "de41e337f773a7efe484d561e097462cac3c6dd8" }
-arrow-ord = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "de41e337f773a7efe484d561e097462cac3c6dd8" }
-arrow-schema = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "de41e337f773a7efe484d561e097462cac3c6dd8" }
-parquet = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "de41e337f773a7efe484d561e097462cac3c6dd8" }
+arrow = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "ee0a61a09bdcfb66682ad39d48107fde65ca1287" }
+arrow-buffer = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "ee0a61a09bdcfb66682ad39d48107fde65ca1287" }
+arrow-flight = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "ee0a61a09bdcfb66682ad39d48107fde65ca1287" }
+arrow-ipc = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "ee0a61a09bdcfb66682ad39d48107fde65ca1287" }
+arrow-ord = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "ee0a61a09bdcfb66682ad39d48107fde65ca1287" }
+arrow-schema = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "ee0a61a09bdcfb66682ad39d48107fde65ca1287" }
+parquet = { git = "https://github.com/elastiflow/arrow-rs.git", rev = "ee0a61a09bdcfb66682ad39d48107fde65ca1287" }
 
 
