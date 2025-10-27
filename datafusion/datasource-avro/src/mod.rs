@@ -26,9 +26,9 @@
 
 //! An [Avro](https://avro.apache.org/) based [`FileSource`](datafusion_datasource::file::FileSource) implementation and related functionality.
 
-pub mod avro_to_arrow;
 pub mod file_format;
 pub mod source;
+pub mod writer;
 
-pub use apache_avro;
 pub use file_format::*;
+pub use writer::plan_to_avro;

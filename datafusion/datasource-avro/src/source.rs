@@ -20,11 +20,12 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use crate::avro_to_arrow::Reader as AvroReader;
+use arrow_avro::reader::{Reader, ReaderBuilder};
+use arrow_avro::schema::AvroSchema;
 
 use arrow::datatypes::SchemaRef;
 use datafusion_common::error::Result;
-use datafusion_common::Statistics;
+use datafusion_common::{DataFusionError, HashSet, Statistics};
 use datafusion_datasource::file::FileSource;
 use datafusion_datasource::file_scan_config::FileScanConfig;
 use datafusion_datasource::file_stream::FileOpener;
@@ -33,6 +34,61 @@ use datafusion_physical_expr_common::sort_expr::LexOrdering;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 
 use object_store::ObjectStore;
+use serde_json::{from_str, to_string, Value};
+
+/// Projects an Avro schema by retaining only the specified columns.
+///
+/// This function is designed to work with Arrow Avro to perform
+/// column projection via a reader schema.
+///
+/// # Arguments
+///
+/// * `schema_str` - A string slice that holds the JSON representation of the Avro schema.
+/// * `projection` - An `Option<&[String]>` containing the names of the columns to keep.
+///                  If `None`, the original schema is returned.
+///
+/// # Returns
+///
+/// A `Result` containing the JSON string of the projected schema, or an `Error`
+/// if parsing or processing fails.
+pub fn project_schema(
+    schema: AvroSchema,
+    projection: Option<&[String]>,
+) -> Result<AvroSchema> {
+    let columns_to_keep = match projection {
+        Some(p) => p,
+        None => return Ok(schema),
+    };
+    let mut json_value: Value =
+        from_str(&schema.json_string).map_err(|e| DataFusionError::External(e.into()))?;
+
+    if let Value::Object(ref mut map) = json_value {
+        if let Some(fields) = map.get_mut("fields") {
+            if let Value::Array(ref mut fields_array) = fields {
+                if columns_to_keep.is_empty() {
+                    fields_array.clear();
+                } else {
+                    let projection_set: HashSet<&str> =
+                        columns_to_keep.iter().map(AsRef::as_ref).collect();
+
+                    fields_array.retain(|field| {
+                        field
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map_or(false, |name| projection_set.contains(name))
+                    });
+                }
+            }
+        }
+    }
+
+    let projected_json_string =
+        to_string(&json_value).map_err(|e| DataFusionError::External(e.into()))?;
+
+    Ok(AvroSchema {
+        json_string: projected_json_string,
+    })
+}
 
 /// AvroSource holds the extra configuration that is necessary for opening avro files
 #[derive(Clone, Default)]
@@ -51,13 +107,21 @@ impl AvroSource {
         Self::default()
     }
 
-    fn open<R: std::io::Read>(&self, reader: R) -> Result<AvroReader<'static, R>> {
-        AvroReader::try_new(
-            reader,
-            Arc::clone(self.schema.as_ref().expect("Schema must set before open")),
-            self.batch_size.expect("Batch size must set before open"),
-            self.projection.clone(),
-        )
+    fn open<R: std::io::Read + std::io::BufRead>(&self, reader: R) -> Result<Reader<R>> {
+        let avro_schema = AvroSchema::try_from(
+            self.schema
+                .as_ref()
+                .expect("Schema must set before open")
+                .as_ref(),
+        )?;
+
+        let projected_schema = project_schema(avro_schema, self.projection.as_deref())?;
+
+        ReaderBuilder::new()
+            .with_reader_schema(projected_schema)
+            .with_batch_size(self.batch_size.expect("Batch size must set before open"))
+            .build(reader)
+            .map_err(Into::into)
     }
 }
 
@@ -89,15 +153,15 @@ impl FileSource for AvroSource {
         conf.schema = Some(schema);
         Arc::new(conf)
     }
-    fn with_statistics(&self, statistics: Statistics) -> Arc<dyn FileSource> {
-        let mut conf = self.clone();
-        conf.projected_statistics = Some(statistics);
-        Arc::new(conf)
-    }
-
     fn with_projection(&self, config: &FileScanConfig) -> Arc<dyn FileSource> {
         let mut conf = self.clone();
         conf.projection = config.projected_file_column_names();
+        Arc::new(conf)
+    }
+
+    fn with_statistics(&self, statistics: Statistics) -> Arc<dyn FileSource> {
+        let mut conf = self.clone();
+        conf.projected_statistics = Some(statistics);
         Arc::new(conf)
     }
 
@@ -143,6 +207,7 @@ impl FileSource for AvroSource {
 
 mod private {
     use super::*;
+    use std::io::BufReader;
 
     use bytes::Buf;
     use datafusion_datasource::{file_stream::FileOpenFuture, PartitionedFile};
@@ -164,7 +229,8 @@ mod private {
                     .await?;
                 match r.payload {
                     GetResultPayload::File(file, _) => {
-                        let reader = config.open(file)?;
+                        let buffered_reader = BufReader::new(file);
+                        let reader = config.open(buffered_reader)?;
                         Ok(futures::stream::iter(reader)
                             .map(|r| r.map_err(Into::into))
                             .boxed())

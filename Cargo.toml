@@ -89,11 +89,11 @@ version = "50.2.0"
 ahash = { version = "0.8", default-features = false, features = [
     "runtime-rng",
 ] }
-apache-avro = { version = "0.20", default-features = false }
 arrow = { version = "56.2.0", features = [
     "prettyprint",
     "chrono-tz",
 ] }
+arrow-avro = { version = "56.2.0", default-features = false }
 arrow-buffer = { version = "56.2.0", default-features = false }
 arrow-flight = { version = "56.2.0", features = [
     "flight-sql-experimental",
@@ -258,3 +258,24 @@ incremental = false
 inherits = "release"
 debug = true
 strip = false
+
+[patch.crates-io]
+arrow = { git = "https://github.com/apache/arrow-rs.git", rev = "521f219e308613811aeae11300bf7a7b0fb5ec29" }
+arrow-array = { git = "https://github.com/apache/arrow-rs.git", rev = "521f219e308613811aeae11300bf7a7b0fb5ec29" }
+arrow-avro = { git = "https://github.com/apache/arrow-rs.git", rev = "521f219e308613811aeae11300bf7a7b0fb5ec29" }
+arrow-buffer = { git = "https://github.com/apache/arrow-rs.git", rev = "521f219e308613811aeae11300bf7a7b0fb5ec29" }
+arrow-flight = { git = "https://github.com/apache/arrow-rs.git", rev = "521f219e308613811aeae11300bf7a7b0fb5ec29" }
+arrow-ipc = { git = "https://github.com/apache/arrow-rs.git", rev = "521f219e308613811aeae11300bf7a7b0fb5ec29" }
+arrow-ord = { git = "https://github.com/apache/arrow-rs.git", rev = "521f219e308613811aeae11300bf7a7b0fb5ec29" }
+arrow-schema = { git = "https://github.com/apache/arrow-rs.git", rev = "521f219e308613811aeae11300bf7a7b0fb5ec29" }
+parquet = { git = "https://github.com/apache/arrow-rs.git", rev = "521f219e308613811aeae11300bf7a7b0fb5ec29" }
+
+
+#321f0e5bbe6ed696bba6ae7a7794b50d000d96a0 this is Connor's last change
+#1eb62bd39119a003d5b240108055e3a6697a1cfd this is the change before the ParquetMetadata complexity
+#d5df352f18e50664605aa3ea598643e19a0b1647 this is the complex first stage Thrift remodel
+#521f219e308613811aeae11300bf7a7b0fb5ec29 this is the last one before the big Thrift remodel PR.
+
+#Using arrow-rs as of Oct 8, "Migrate arrow-avro to Rust 2024 (#8545)". To avoid big conflicts, this misses out on
+#arrow-avro PRs "Add support for 64-bit Schema Registry IDs (Id64)", "Add support for run-end encoded (REE) arrays in arrow-avro",
+#"Add ArrowError::AvroError, remaining types and roundtrip tests to arrow-avro", and "Fix Writer docs and rename AvroBinaryFormat to AvroSoeFormat"

@@ -17,5 +17,27 @@
 
 //! Options related to how avro files should be written
 
+use crate::parsers::CompressionTypeVariant;
+
+#[cfg(feature = "avro")]
+use arrow_avro::writer::WriterBuilder;
+
 #[derive(Clone, Debug)]
-pub struct AvroWriterOptions {}
+pub struct AvroWriterOptions {
+    #[cfg(feature = "avro")]
+    pub writer_options: WriterBuilder,
+    pub compression: CompressionTypeVariant,
+}
+
+#[cfg(feature = "avro")]
+impl AvroWriterOptions {
+    pub fn new(
+        writer_options: WriterBuilder,
+        compression: CompressionTypeVariant,
+    ) -> Self {
+        Self {
+            writer_options,
+            compression,
+        }
+    }
+}

@@ -148,7 +148,8 @@ impl<T: DecimalType> DecimalAverager<T> {
             let new_value = value.div_wrapping(count);
 
             let validate =
-                T::validate_decimal_precision(new_value, self.target_precision);
+                T::validate_decimal_precision(new_value, self.target_precision, 88);
+            // TODO: REMOVE SCALE VALUE
 
             if validate.is_ok() {
                 Ok(new_value)

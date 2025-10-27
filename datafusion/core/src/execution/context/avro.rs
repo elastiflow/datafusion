@@ -17,7 +17,10 @@
 
 use super::super::options::{AvroReadOptions, ReadOptions};
 use super::{DataFilePaths, DataFrame, Result, SessionContext};
+use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::TableReference;
+use datafusion_datasource_avro::plan_to_avro;
+use datafusion_physical_plan::ExecutionPlan;
 use std::sync::Arc;
 
 impl SessionContext {
@@ -57,5 +60,15 @@ impl SessionContext {
         )
         .await?;
         Ok(())
+    }
+
+    /// Executes a query and writes the results to an Avro file.
+    pub async fn write_avro(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        path: impl AsRef<str>,
+        compression: Option<CompressionTypeVariant>,
+    ) -> Result<()> {
+        plan_to_avro(self.task_ctx(), plan, path, compression).await
     }
 }
