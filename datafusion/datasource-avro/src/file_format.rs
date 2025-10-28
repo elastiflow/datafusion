@@ -20,13 +20,16 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
+use std::io::{BufReader, Read};
 use std::sync::Arc;
 
-use crate::avro_to_arrow::read_avro_schema_from_reader;
 use crate::source::AvroSource;
 
 use arrow::datatypes::Schema;
 use arrow::datatypes::SchemaRef;
+use arrow_avro::compression::CompressionCodec;
+use arrow_avro::reader::ReaderBuilder;
+use bytes::Buf;
 use datafusion_common::internal_err;
 use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::GetExt;
@@ -43,6 +46,13 @@ use datafusion_session::Session;
 use async_trait::async_trait;
 use object_store::{GetResultPayload, ObjectMeta, ObjectStore};
 
+pub fn read_avro_schema_from_reader<R: Read>(reader: R) -> Result<SchemaRef> {
+    let buffered_reader = BufReader::new(reader);
+
+    let avro_reader = ReaderBuilder::new().build(buffered_reader)?;
+
+    Ok(avro_reader.schema())
+}
 #[derive(Default)]
 /// Factory struct used to create [`AvroFormat`]
 pub struct AvroFormatFactory;
@@ -124,18 +134,17 @@ impl FileFormat for AvroFormat {
         for object in objects {
             let r = store.as_ref().get(&object.location).await?;
             let schema = match r.payload {
-                GetResultPayload::File(mut file, _) => {
-                    read_avro_schema_from_reader(&mut file)?
-                }
+                GetResultPayload::File(file, _) => read_avro_schema_from_reader(file)?,
                 GetResultPayload::Stream(_) => {
                     // TODO: Fetching entire file to get schema is potentially wasteful
                     let data = r.bytes().await?;
-                    read_avro_schema_from_reader(&mut data.as_ref())?
+                    read_avro_schema_from_reader(data.reader())?
                 }
             };
             schemas.push(schema);
         }
-        let merged_schema = Schema::try_merge(schemas)?;
+        let merged_schema =
+            Schema::try_merge(schemas.iter().map(|s| s.as_ref().clone()))?;
         Ok(Arc::new(merged_schema))
     }
 

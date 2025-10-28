@@ -30,8 +30,6 @@ use std::sync::Arc;
 use crate::utils::datafusion_strsim::normalized_levenshtein;
 use crate::utils::quote_identifier;
 use crate::{Column, DFSchema, Diagnostic, TableReference};
-#[cfg(feature = "avro")]
-use apache_avro::Error as AvroError;
 use arrow::error::ArrowError;
 #[cfg(feature = "parquet")]
 use parquet::errors::ParquetError;
@@ -59,8 +57,8 @@ pub enum DataFusionError {
     #[cfg(feature = "parquet")]
     ParquetError(Box<ParquetError>),
     /// Error when reading Avro data.
-    #[cfg(feature = "avro")]
-    AvroError(Box<AvroError>),
+    // #[cfg(feature = "avro")]
+    // AvroError(Box<AvroError>),
     /// Error when reading / writing to / from an object_store (e.g. S3 or LocalFile)
     #[cfg(feature = "object_store")]
     ObjectStore(Box<object_store::Error>),
@@ -310,12 +308,12 @@ impl From<ParquetError> for DataFusionError {
     }
 }
 
-#[cfg(feature = "avro")]
-impl From<AvroError> for DataFusionError {
-    fn from(e: AvroError) -> Self {
-        DataFusionError::AvroError(Box::new(e))
-    }
-}
+// #[cfg(feature = "avro")]
+// impl From<AvroError> for DataFusionError {
+//     fn from(e: AvroError) -> Self {
+//         DataFusionError::AvroError(Box::new(e))
+//     }
+// }
 
 #[cfg(feature = "object_store")]
 impl From<object_store::Error> for DataFusionError {
@@ -367,8 +365,8 @@ impl Error for DataFusionError {
             DataFusionError::ArrowError(e, _) => Some(e.as_ref()),
             #[cfg(feature = "parquet")]
             DataFusionError::ParquetError(e) => Some(e.as_ref()),
-            #[cfg(feature = "avro")]
-            DataFusionError::AvroError(e) => Some(e.as_ref()),
+            // #[cfg(feature = "avro")]
+            // DataFusionError::AvroError(e) => Some(e.as_ref()),
             #[cfg(feature = "object_store")]
             DataFusionError::ObjectStore(e) => Some(e.as_ref()),
             DataFusionError::IoError(e) => Some(e),
@@ -497,8 +495,8 @@ impl DataFusionError {
             DataFusionError::ArrowError(_, _) => "Arrow error: ",
             #[cfg(feature = "parquet")]
             DataFusionError::ParquetError(_) => "Parquet error: ",
-            #[cfg(feature = "avro")]
-            DataFusionError::AvroError(_) => "Avro error: ",
+            // #[cfg(feature = "avro")]
+            // DataFusionError::AvroError(_) => "Avro error: ",
             #[cfg(feature = "object_store")]
             DataFusionError::ObjectStore(_) => "Object Store error: ",
             DataFusionError::IoError(_) => "IO error: ",
@@ -537,8 +535,8 @@ impl DataFusionError {
             }
             #[cfg(feature = "parquet")]
             DataFusionError::ParquetError(ref desc) => Cow::Owned(desc.to_string()),
-            #[cfg(feature = "avro")]
-            DataFusionError::AvroError(ref desc) => Cow::Owned(desc.to_string()),
+            // #[cfg(feature = "avro")]
+            // DataFusionError::AvroError(ref desc) => Cow::Owned(desc.to_string()),
             DataFusionError::IoError(ref desc) => Cow::Owned(desc.to_string()),
             #[cfg(feature = "sql")]
             DataFusionError::SQL(ref desc, ref backtrace) => {
