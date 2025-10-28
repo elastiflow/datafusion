@@ -40,28 +40,39 @@ use std::hash::Hash;
 use std::ops::Range;
 use std::sync::{Arc, LazyLock};
 
-define_udwf_and_expr!(
+get_or_init_udwf!(
     First,
     first_value,
-    [arg],
-    "Returns the first value in the window frame",
+    "returns the first value in the window frame",
     NthValue::first
 );
-define_udwf_and_expr!(
+get_or_init_udwf!(
     Last,
     last_value,
-    [arg],
-    "Returns the last value in the window frame",
+    "returns the last value in the window frame",
     NthValue::last
 );
 get_or_init_udwf!(
     NthValue,
     nth_value,
-    "Returns the nth value in the window frame",
+    "returns the nth value in the window frame",
     NthValue::nth
 );
 
+/// Create an expression to represent the `first_value` window function
+///
+pub fn first_value(arg: datafusion_expr::Expr) -> datafusion_expr::Expr {
+    first_value_udwf().call(vec![arg])
+}
+
+/// Create an expression to represent the `last_value` window function
+///
+pub fn last_value(arg: datafusion_expr::Expr) -> datafusion_expr::Expr {
+    last_value_udwf().call(vec![arg])
+}
+
 /// Create an expression to represent the `nth_value` window function
+///
 pub fn nth_value(arg: datafusion_expr::Expr, n: i64) -> datafusion_expr::Expr {
     nth_value_udwf().call(vec![arg, n.lit()])
 }

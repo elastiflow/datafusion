@@ -17,7 +17,7 @@
 
 //! Execution plans that read file formats
 
-pub mod arrow;
+mod arrow_file;
 pub mod csv;
 pub mod json;
 
@@ -35,9 +35,10 @@ pub use datafusion_datasource_parquet::source::ParquetSource;
 #[cfg(feature = "parquet")]
 pub use datafusion_datasource_parquet::{ParquetFileMetrics, ParquetFileReaderFactory};
 
+pub use arrow_file::ArrowSource;
+
 pub use json::{JsonOpener, JsonSource};
 
-pub use arrow::{ArrowOpener, ArrowSource};
 pub use csv::{CsvOpener, CsvSource};
 pub use datafusion_datasource::file::FileSource;
 pub use datafusion_datasource::file_groups::FileGroup;

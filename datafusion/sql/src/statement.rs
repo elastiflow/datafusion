@@ -29,7 +29,7 @@ use crate::planner::{
 };
 use crate::utils::normalize_ident;
 
-use arrow::datatypes::{Field, FieldRef, Fields};
+use arrow::datatypes::{DataType, Fields};
 use datafusion_common::error::_plan_err;
 use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::{
@@ -242,16 +242,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 table_name,
                 ..
             } => self.describe_table_to_plan(table_name),
-            Statement::Explain {
-                describe_alias: DescribeAlias::Describe | DescribeAlias::Desc, // only parse 'DESCRIBE statement' or 'DESC statement' and not 'EXPLAIN statement'
-                statement,
-                ..
-            } => match *statement {
-                Statement::Query(query) => self.describe_query_to_plan(*query),
-                _ => {
-                    not_impl_err!("Describing statements other than SELECT not supported")
-                }
-            },
             Statement::Explain {
                 verbose,
                 statement,
@@ -740,14 +730,14 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 statement,
             } => {
                 // Convert parser data types to DataFusion data types
-                let mut fields: Vec<FieldRef> = data_types
+                let mut data_types: Vec<DataType> = data_types
                     .into_iter()
-                    .map(|t| self.convert_data_type_to_field(&t))
+                    .map(|t| self.convert_data_type(&t))
                     .collect::<Result<_>>()?;
 
                 // Create planner context with parameters
-                let mut planner_context =
-                    PlannerContext::new().with_prepare_param_data_types(fields.clone());
+                let mut planner_context = PlannerContext::new()
+                    .with_prepare_param_data_types(data_types.clone());
 
                 // Build logical plan for inner statement of the prepare statement
                 let plan = self.sql_statement_to_plan_with_context_impl(
@@ -755,21 +745,21 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     &mut planner_context,
                 )?;
 
-                if fields.is_empty() {
-                    let map_types = plan.get_parameter_fields()?;
+                if data_types.is_empty() {
+                    let map_types = plan.get_parameter_types()?;
                     let param_types: Vec<_> = (1..=map_types.len())
                         .filter_map(|i| {
                             let key = format!("${i}");
                             map_types.get(&key).and_then(|opt| opt.clone())
                         })
                         .collect();
-                    fields.extend(param_types.iter().cloned());
+                    data_types.extend(param_types.iter().cloned());
                     planner_context.with_prepare_param_data_types(param_types);
                 }
 
                 Ok(LogicalPlan::Statement(PlanStatement::Prepare(Prepare {
                     name: ident_to_string(&name),
-                    fields,
+                    data_types,
                     input: Arc::new(plan),
                 })))
             }
@@ -1189,7 +1179,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 ..
             }) => {
                 let return_type = match return_type {
-                    Some(t) => Some(self.convert_data_type_to_field(&t)?),
+                    Some(t) => Some(self.convert_data_type(&t)?),
                     None => None,
                 };
                 let mut planner_context = PlannerContext::new();
@@ -1200,8 +1190,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         let function_args = function_args
                             .into_iter()
                             .map(|arg| {
-                                let data_type =
-                                    self.convert_data_type_to_field(&arg.data_type)?;
+                                let data_type = self.convert_data_type(&arg.data_type)?;
 
                                 let default_expr = match arg.default_expr {
                                     Some(expr) => Some(self.sql_to_expr(
@@ -1214,7 +1203,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 Ok(OperateFunctionArg {
                                     name: arg.name,
                                     default_expr,
-                                    data_type: data_type.data_type().clone(),
+                                    data_type,
                                 })
                             })
                             .collect::<Result<Vec<OperateFunctionArg>>>();
@@ -1232,9 +1221,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 // Convert resulting expression to data fusion expression
                 //
                 let arg_types = args.as_ref().map(|arg| {
-                    arg.iter()
-                        .map(|t| Arc::new(Field::new("", t.data_type.clone(), true)))
-                        .collect::<Vec<_>>()
+                    arg.iter().map(|t| t.data_type.clone()).collect::<Vec<_>>()
                 });
                 let mut planner_context = PlannerContext::new()
                     .with_prepare_param_data_types(arg_types.unwrap_or_default());
@@ -1277,7 +1264,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     or_replace,
                     temporary,
                     name,
-                    return_type: return_type.map(|f| f.data_type().clone()),
+                    return_type,
                     args,
                     params,
                     schema: DFSchemaRef::new(DFSchema::empty()),
@@ -1400,19 +1387,6 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         let table_source = self.context_provider.get_table_source(table_ref)?;
 
         let schema = table_source.schema();
-
-        let output_schema = DFSchema::try_from(LogicalPlan::describe_schema()).unwrap();
-
-        Ok(LogicalPlan::DescribeTable(DescribeTable {
-            schema,
-            output_schema: Arc::new(output_schema),
-        }))
-    }
-
-    fn describe_query_to_plan(&self, query: Query) -> Result<LogicalPlan> {
-        let plan = self.query_to_plan(query, &mut PlannerContext::new())?;
-
-        let schema = Arc::new(plan.schema().as_arrow().clone());
 
         let output_schema = DFSchema::try_from(LogicalPlan::describe_schema()).unwrap();
 
@@ -2024,10 +1998,10 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                         )?;
                         // Update placeholder's datatype to the type of the target column
                         if let Expr::Placeholder(placeholder) = &mut expr {
-                            placeholder.field = placeholder
-                                .field
+                            placeholder.data_type = placeholder
+                                .data_type
                                 .take()
-                                .or_else(|| Some(Arc::clone(field)));
+                                .or_else(|| Some(field.data_type().clone()));
                         }
                         // Cast to target column type, if necessary
                         expr.cast_to(field.data_type(), source.schema())?
@@ -2131,7 +2105,8 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                                 idx + 1
                             )
                         })?;
-                        let _ = prepare_param_data_types.insert(name, Arc::clone(field));
+                        let dt = field.data_type().clone();
+                        let _ = prepare_param_data_types.insert(name, dt);
                     }
                 }
             }

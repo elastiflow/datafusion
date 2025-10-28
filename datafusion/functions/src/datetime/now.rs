@@ -19,14 +19,12 @@ use arrow::datatypes::DataType::Timestamp;
 use arrow::datatypes::TimeUnit::Nanosecond;
 use arrow::datatypes::{DataType, Field, FieldRef};
 use std::any::Any;
-use std::sync::Arc;
 
-use datafusion_common::config::ConfigOptions;
 use datafusion_common::{internal_err, Result, ScalarValue};
 use datafusion_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
 use datafusion_expr::{
-    ColumnarValue, Documentation, Expr, ReturnFieldArgs, ScalarUDF, ScalarUDFImpl,
-    Signature, Volatility,
+    ColumnarValue, Documentation, Expr, ReturnFieldArgs, ScalarUDFImpl, Signature,
+    Volatility,
 };
 use datafusion_macros::user_doc;
 
@@ -43,30 +41,19 @@ The `now()` return value is determined at query time and will return the same ti
 pub struct NowFunc {
     signature: Signature,
     aliases: Vec<String>,
-    timezone: Option<Arc<str>>,
 }
 
 impl Default for NowFunc {
     fn default() -> Self {
-        Self::new_with_config(&ConfigOptions::default())
+        Self::new()
     }
 }
 
 impl NowFunc {
-    #[deprecated(since = "50.2.0", note = "use `new_with_config` instead")]
     pub fn new() -> Self {
         Self {
             signature: Signature::nullary(Volatility::Stable),
             aliases: vec!["current_timestamp".to_string()],
-            timezone: Some(Arc::from("+00")),
-        }
-    }
-
-    pub fn new_with_config(config: &ConfigOptions) -> Self {
-        Self {
-            signature: Signature::nullary(Volatility::Stable),
-            aliases: vec!["current_timestamp".to_string()],
-            timezone: Some(Arc::from(config.execution.time_zone.as_str())),
         }
     }
 }
@@ -90,14 +77,10 @@ impl ScalarUDFImpl for NowFunc {
         &self.signature
     }
 
-    fn with_updated_config(&self, config: &ConfigOptions) -> Option<ScalarUDF> {
-        Some(Self::new_with_config(config).into())
-    }
-
     fn return_field_from_args(&self, _args: ReturnFieldArgs) -> Result<FieldRef> {
         Ok(Field::new(
             self.name(),
-            Timestamp(Nanosecond, self.timezone.clone()),
+            Timestamp(Nanosecond, Some("+00:00".into())),
             false,
         )
         .into())
@@ -123,9 +106,8 @@ impl ScalarUDFImpl for NowFunc {
             .execution_props()
             .query_execution_start_time
             .timestamp_nanos_opt();
-
         Ok(ExprSimplifyResult::Simplified(Expr::Literal(
-            ScalarValue::TimestampNanosecond(now_ts, self.timezone.clone()),
+            ScalarValue::TimestampNanosecond(now_ts, Some("+00:00".into())),
             None,
         )))
     }

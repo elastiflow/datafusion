@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::{any::Any, str::FromStr, sync::Arc};
+use std::{any::Any, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
@@ -24,7 +24,6 @@ use datafusion::{
     prelude::{SessionConfig, SessionContext},
 };
 use datafusion_catalog::{Session, TableProvider};
-use datafusion_common::config::Dialect;
 use datafusion_expr::{dml::InsertOp, Expr, TableType};
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion_physical_plan::execution_plan::SchedulingType;
@@ -64,7 +63,7 @@ async fn assert_insert_op(ctx: &SessionContext, sql: &str, insert_op: InsertOp) 
 fn session_ctx_with_dialect(dialect: impl Into<String>) -> SessionContext {
     let mut config = SessionConfig::new();
     let options = config.options_mut();
-    options.sql_parser.dialect = Dialect::from_str(&dialect.into()).unwrap();
+    options.sql_parser.dialect = dialect.into();
     SessionContext::new_with_config(config)
 }
 

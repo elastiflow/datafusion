@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow::ipc::writer::{CompressionContext, DictionaryTracker, IpcDataGenerator};
+use arrow::ipc::writer::{DictionaryTracker, IpcDataGenerator};
 use std::sync::Arc;
 
 use arrow_flight::{PollInfo, SchemaAsIpc};
@@ -106,7 +106,6 @@ impl FlightService for FlightServiceImpl {
 
                 // add an initial FlightData message that sends schema
                 let options = arrow::ipc::writer::IpcWriteOptions::default();
-                let mut compression_context = CompressionContext::default();
                 let schema_flight_data = SchemaAsIpc::new(&schema, &options);
 
                 let mut flights = vec![FlightData::from(schema_flight_data)];
@@ -116,7 +115,7 @@ impl FlightService for FlightServiceImpl {
 
                 for batch in &results {
                     let (flight_dictionaries, flight_batch) = encoder
-                        .encode(batch, &mut tracker, &options, &mut compression_context)
+                        .encoded_batch(batch, &mut tracker, &options)
                         .map_err(|e: ArrowError| Status::internal(e.to_string()))?;
 
                     flights.extend(flight_dictionaries.into_iter().map(Into::into));

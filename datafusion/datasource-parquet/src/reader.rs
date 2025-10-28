@@ -262,9 +262,8 @@ impl AsyncFileReader for CachedParquetFileReader {
 
         async move {
             #[cfg(feature = "parquet_encryption")]
-            let file_decryption_properties = options
-                .and_then(|o| o.file_decryption_properties())
-                .map(Arc::clone);
+            let file_decryption_properties =
+                options.and_then(|o| o.file_decryption_properties());
 
             #[cfg(not(feature = "parquet_encryption"))]
             let file_decryption_properties = None;

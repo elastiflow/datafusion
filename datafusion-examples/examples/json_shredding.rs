@@ -27,7 +27,7 @@ use datafusion::common::tree_node::{
 };
 use datafusion::common::{assert_contains, exec_datafusion_err, Result};
 use datafusion::datasource::listing::{
-    ListingTable, ListingTableConfig, ListingTableConfigExt, ListingTableUrl,
+    ListingTable, ListingTableConfig, ListingTableUrl,
 };
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::object_store::ObjectStoreUrl;

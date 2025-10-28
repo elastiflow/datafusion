@@ -17,14 +17,13 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::Field;
+use datafusion::execution::registry::FunctionRegistry;
 use datafusion_common::{
     exec_datafusion_err, internal_err, plan_datafusion_err, NullEquality,
     RecursionUnnestOption, Result, ScalarValue, TableReference, UnnestOptions,
 };
-use datafusion_execution::registry::FunctionRegistry;
 use datafusion_expr::dml::InsertOp;
-use datafusion_expr::expr::{Alias, NullTreatment, Placeholder, Sort};
+use datafusion_expr::expr::{Alias, Placeholder, Sort};
 use datafusion_expr::expr::{Unnest, WildcardOptions};
 use datafusion_expr::{
     expr::{self, InList, WindowFunction},
@@ -244,15 +243,6 @@ impl From<protobuf::dml_node::Type> for WriteOp {
     }
 }
 
-impl From<protobuf::NullTreatment> for NullTreatment {
-    fn from(t: protobuf::NullTreatment) -> Self {
-        match t {
-            protobuf::NullTreatment::RespectNulls => NullTreatment::RespectNulls,
-            protobuf::NullTreatment::IgnoreNulls => NullTreatment::IgnoreNulls,
-        }
-    }
-}
-
 pub fn parse_expr(
     proto: &protobuf::LogicalExprNode,
     registry: &dyn FunctionRegistry,
@@ -311,20 +301,9 @@ pub fn parse_expr(
                     exec_datafusion_err!("missing window frame during deserialization")
                 })?;
 
-            let null_treatment = match expr.null_treatment {
-                Some(null_treatment) => {
-                    let null_treatment  =  protobuf::NullTreatment::try_from(null_treatment)
-                    .map_err(|_| {
-                        proto_error(format!(
-                            "Received a WindowExprNode message with unknown NullTreatment {null_treatment}",
-                        ))
-                    })?;
-                    Some(NullTreatment::from(null_treatment))
-                }
-                None => None,
-            };
-
-            let agg_fn = match window_function {
+            // TODO: support null treatment, distinct, and filter in proto.
+            // See https://github.com/apache/datafusion/issues/17417
+            match window_function {
                 window_expr_node::WindowFunction::Udaf(udaf_name) => {
                     let udaf_function = match &expr.fun_definition {
                         Some(buf) => codec.try_decode_udaf(udaf_name, buf)?,
@@ -332,7 +311,17 @@ pub fn parse_expr(
                             .udaf(udaf_name)
                             .or_else(|_| codec.try_decode_udaf(udaf_name, &[]))?,
                     };
-                    expr::WindowFunctionDefinition::AggregateUDF(udaf_function)
+
+                    let args = parse_exprs(&expr.exprs, registry, codec)?;
+                    Expr::from(WindowFunction::new(
+                        expr::WindowFunctionDefinition::AggregateUDF(udaf_function),
+                        args,
+                    ))
+                    .partition_by(partition_by)
+                    .order_by(order_by)
+                    .window_frame(window_frame)
+                    .build()
+                    .map_err(Error::DataFusionError)
                 }
                 window_expr_node::WindowFunction::Udwf(udwf_name) => {
                     let udwf_function = match &expr.fun_definition {
@@ -341,28 +330,19 @@ pub fn parse_expr(
                             .udwf(udwf_name)
                             .or_else(|_| codec.try_decode_udwf(udwf_name, &[]))?,
                     };
-                    expr::WindowFunctionDefinition::WindowUDF(udwf_function)
+
+                    let args = parse_exprs(&expr.exprs, registry, codec)?;
+                    Expr::from(WindowFunction::new(
+                        expr::WindowFunctionDefinition::WindowUDF(udwf_function),
+                        args,
+                    ))
+                    .partition_by(partition_by)
+                    .order_by(order_by)
+                    .window_frame(window_frame)
+                    .build()
+                    .map_err(Error::DataFusionError)
                 }
-            };
-
-            let args = parse_exprs(&expr.exprs, registry, codec)?;
-            let mut builder = Expr::from(WindowFunction::new(agg_fn, args))
-                .partition_by(partition_by)
-                .order_by(order_by)
-                .window_frame(window_frame)
-                .null_treatment(null_treatment);
-
-            if expr.distinct {
-                builder = builder.distinct();
-            };
-
-            if let Some(filter) =
-                parse_optional_expr(expr.filter.as_deref(), registry, codec)?
-            {
-                builder = builder.filter(filter);
             }
-
-            builder.build().map_err(Error::DataFusionError)
         }
         ExprType::Alias(alias) => Ok(Expr::Alias(Alias::new(
             parse_required_expr(alias.expr.as_deref(), registry, "expr", codec)?,
@@ -591,18 +571,6 @@ pub fn parse_expr(
                     .udaf(&pb.fun_name)
                     .or_else(|_| codec.try_decode_udaf(&pb.fun_name, &[]))?,
             };
-            let null_treatment = match pb.null_treatment {
-                Some(null_treatment) => {
-                    let null_treatment  =  protobuf::NullTreatment::try_from(null_treatment)
-                    .map_err(|_| {
-                        proto_error(format!(
-                            "Received an AggregateUdfExprNode message with unknown NullTreatment {null_treatment}",
-                        ))
-                    })?;
-                    Some(NullTreatment::from(null_treatment))
-                }
-                None => None,
-            };
 
             Ok(Expr::AggregateFunction(expr::AggregateFunction::new_udf(
                 agg_fn,
@@ -610,7 +578,7 @@ pub fn parse_expr(
                 pb.distinct,
                 parse_optional_expr(pb.filter.as_deref(), registry, codec)?.map(Box::new),
                 parse_sorts(&pb.order_by, registry, codec)?,
-                null_treatment,
+                None,
             )))
         }
 
@@ -627,25 +595,12 @@ pub fn parse_expr(
         ExprType::Rollup(RollupNode { expr }) => Ok(Expr::GroupingSet(
             GroupingSet::Rollup(parse_exprs(expr, registry, codec)?),
         )),
-        ExprType::Placeholder(PlaceholderNode {
-            id,
-            data_type,
-            nullable,
-            metadata,
-        }) => match data_type {
-            None => Ok(Expr::Placeholder(Placeholder::new_with_field(
+        ExprType::Placeholder(PlaceholderNode { id, data_type }) => match data_type {
+            None => Ok(Expr::Placeholder(Placeholder::new(id.clone(), None))),
+            Some(data_type) => Ok(Expr::Placeholder(Placeholder::new(
                 id.clone(),
-                None,
+                Some(data_type.try_into()?),
             ))),
-            Some(data_type) => {
-                let field =
-                    Field::new("", data_type.try_into()?, nullable.unwrap_or(true))
-                        .with_metadata(metadata.clone());
-                Ok(Expr::Placeholder(Placeholder::new_with_field(
-                    id.clone(),
-                    Some(field.into()),
-                )))
-            }
         },
     }
 }

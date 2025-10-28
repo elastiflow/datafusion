@@ -369,38 +369,27 @@ pub(super) fn array_to_string_inner(args: &[ArrayRef]) -> Result<ArrayRef> {
             List(..) => {
                 let list_array = as_list_array(&arr)?;
                 for i in 0..list_array.len() {
-                    if !list_array.is_null(i) {
-                        compute_array_to_string(
-                            arg,
-                            list_array.value(i),
-                            delimiter.clone(),
-                            null_string.clone(),
-                            with_null_string,
-                        )?;
-                    } else if with_null_string {
-                        arg.push_str(&null_string);
-                        arg.push_str(&delimiter);
-                    }
+                    compute_array_to_string(
+                        arg,
+                        list_array.value(i),
+                        delimiter.clone(),
+                        null_string.clone(),
+                        with_null_string,
+                    )?;
                 }
 
                 Ok(arg)
             }
             FixedSizeList(..) => {
                 let list_array = as_fixed_size_list_array(&arr)?;
-
                 for i in 0..list_array.len() {
-                    if !list_array.is_null(i) {
-                        compute_array_to_string(
-                            arg,
-                            list_array.value(i),
-                            delimiter.clone(),
-                            null_string.clone(),
-                            with_null_string,
-                        )?;
-                    } else if with_null_string {
-                        arg.push_str(&null_string);
-                        arg.push_str(&delimiter);
-                    }
+                    compute_array_to_string(
+                        arg,
+                        list_array.value(i),
+                        delimiter.clone(),
+                        null_string.clone(),
+                        with_null_string,
+                    )?;
                 }
 
                 Ok(arg)
@@ -408,18 +397,13 @@ pub(super) fn array_to_string_inner(args: &[ArrayRef]) -> Result<ArrayRef> {
             LargeList(..) => {
                 let list_array = as_large_list_array(&arr)?;
                 for i in 0..list_array.len() {
-                    if !list_array.is_null(i) {
-                        compute_array_to_string(
-                            arg,
-                            list_array.value(i),
-                            delimiter.clone(),
-                            null_string.clone(),
-                            with_null_string,
-                        )?;
-                    } else if with_null_string {
-                        arg.push_str(&null_string);
-                        arg.push_str(&delimiter);
-                    }
+                    compute_array_to_string(
+                        arg,
+                        list_array.value(i),
+                        delimiter.clone(),
+                        null_string.clone(),
+                        with_null_string,
+                    )?;
                 }
 
                 Ok(arg)

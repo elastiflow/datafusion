@@ -25,38 +25,41 @@ use arrow::array::{
 use arrow::compute::sum;
 use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::utils::take_function_args;
-use datafusion_common::{not_impl_err, plan_err, Result, ScalarValue};
+use datafusion_common::{not_impl_err, Result, ScalarValue};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
+use datafusion_expr::type_coercion::aggregates::coerce_avg_type;
 use datafusion_expr::utils::format_state_name;
 use datafusion_expr::Volatility::Immutable;
 use datafusion_expr::{
-    Accumulator, AggregateUDFImpl, EmitTo, GroupsAccumulator, ReversedUDAF, Signature,
+    type_coercion::aggregates::avg_return_type, Accumulator, AggregateUDFImpl, EmitTo,
+    GroupsAccumulator, ReversedUDAF, Signature,
 };
 use std::{any::Any, sync::Arc};
+use DataType::*;
 
 /// AVG aggregate expression
 /// Spark average aggregate expression. Differs from standard DataFusion average aggregate
 /// in that it uses an `i64` for the count (DataFusion version uses `u64`); also there is ANSI mode
 /// support planned in the future for Spark version.
 
-// TODO: see if can deduplicate with DF version
-//       https://github.com/apache/datafusion/issues/17964
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SparkAvg {
+    name: String,
     signature: Signature,
-}
-
-impl Default for SparkAvg {
-    fn default() -> Self {
-        Self::new()
-    }
+    input_data_type: DataType,
+    result_data_type: DataType,
 }
 
 impl SparkAvg {
     /// Implement AVG aggregate function
-    pub fn new() -> Self {
+    pub fn new(name: impl Into<String>, data_type: DataType) -> Self {
+        let result_data_type = avg_return_type("avg", &data_type).unwrap();
+
         Self {
+            name: name.into(),
             signature: Signature::user_defined(Immutable),
+            input_data_type: data_type,
+            result_data_type,
         }
     }
 }
@@ -66,87 +69,63 @@ impl AggregateUDFImpl for SparkAvg {
         self
     }
 
-    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
-        let [args] = take_function_args(self.name(), arg_types)?;
-
-        fn coerced_type(data_type: &DataType) -> Result<DataType> {
-            match &data_type {
-                d if d.is_numeric() => Ok(DataType::Float64),
-                DataType::Dictionary(_, v) => coerced_type(v.as_ref()),
-                _ => {
-                    plan_err!("Avg does not support inputs of type {data_type}.")
-                }
-            }
-        }
-        Ok(vec![coerced_type(args)?])
-    }
-
-    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Float64)
-    }
-
-    fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        if acc_args.is_distinct {
-            return not_impl_err!("DistinctAvgAccumulator");
-        }
-
-        let data_type = acc_args.exprs[0].data_type(acc_args.schema)?;
-
+    fn accumulator(&self, _acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
         // instantiate specialized accumulator based for the type
-        match (&data_type, &acc_args.return_type()) {
-            (DataType::Float64, DataType::Float64) => {
-                Ok(Box::<AvgAccumulator>::default())
-            }
-            (dt, return_type) => {
-                not_impl_err!("AvgAccumulator for ({dt} --> {return_type})")
-            }
+        match (&self.input_data_type, &self.result_data_type) {
+            (Float64, Float64) => Ok(Box::<AvgAccumulator>::default()),
+            _ => not_impl_err!(
+                "AvgAccumulator for ({} --> {})",
+                self.input_data_type,
+                self.result_data_type
+            ),
         }
     }
 
-    fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
+    fn state_fields(&self, _args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
         Ok(vec![
             Arc::new(Field::new(
-                format_state_name(self.name(), "sum"),
-                args.input_fields[0].data_type().clone(),
+                format_state_name(&self.name, "sum"),
+                self.input_data_type.clone(),
                 true,
             )),
             Arc::new(Field::new(
-                format_state_name(self.name(), "count"),
-                DataType::Int64,
+                format_state_name(&self.name, "count"),
+                Int64,
                 true,
             )),
         ])
     }
 
     fn name(&self) -> &str {
-        "avg"
+        &self.name
     }
 
     fn reverse_expr(&self) -> ReversedUDAF {
         ReversedUDAF::Identical
     }
 
-    fn groups_accumulator_supported(&self, args: AccumulatorArgs) -> bool {
-        !args.is_distinct
+    fn groups_accumulator_supported(&self, _args: AccumulatorArgs) -> bool {
+        true
     }
 
     fn create_groups_accumulator(
         &self,
-        args: AccumulatorArgs,
+        _args: AccumulatorArgs,
     ) -> Result<Box<dyn GroupsAccumulator>> {
-        let data_type = args.exprs[0].data_type(args.schema)?;
-
         // instantiate specialized accumulator based for the type
-        match (&data_type, args.return_type()) {
-            (DataType::Float64, DataType::Float64) => {
+        match (&self.input_data_type, &self.result_data_type) {
+            (Float64, Float64) => {
                 Ok(Box::new(AvgGroupsAccumulator::<Float64Type, _>::new(
-                    args.return_field.data_type(),
+                    &self.input_data_type,
                     |sum: f64, count: i64| Ok(sum / count as f64),
                 )))
             }
-            (dt, return_type) => {
-                not_impl_err!("AvgGroupsAccumulator for ({dt} --> {return_type})")
-            }
+
+            _ => not_impl_err!(
+                "AvgGroupsAccumulator for ({} --> {})",
+                self.input_data_type,
+                self.result_data_type
+            ),
         }
     }
 
@@ -156,6 +135,15 @@ impl AggregateUDFImpl for SparkAvg {
 
     fn signature(&self) -> &Signature {
         &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        avg_return_type(self.name(), &arg_types[0])
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        let [arg] = take_function_args(self.name(), arg_types)?;
+        coerce_avg_type(self.name(), std::slice::from_ref(arg))
     }
 }
 

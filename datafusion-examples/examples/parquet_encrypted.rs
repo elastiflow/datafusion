@@ -16,13 +16,12 @@
 // under the License.
 
 use datafusion::common::DataFusionError;
-use datafusion::config::{ConfigFileEncryptionProperties, TableParquetOptions};
+use datafusion::config::TableParquetOptions;
 use datafusion::dataframe::{DataFrame, DataFrameWriteOptions};
 use datafusion::logical_expr::{col, lit};
 use datafusion::parquet::encryption::decrypt::FileDecryptionProperties;
 use datafusion::parquet::encryption::encrypt::FileEncryptionProperties;
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
-use std::sync::Arc;
 use tempfile::TempDir;
 
 #[tokio::main]
@@ -56,7 +55,7 @@ async fn main() -> datafusion::common::Result<()> {
 
     // Write encrypted parquet
     let mut options = TableParquetOptions::default();
-    options.crypto.file_encryption = Some(ConfigFileEncryptionProperties::from(&encrypt));
+    options.crypto.file_encryption = Some((&encrypt).into());
     parquet_df
         .write_parquet(
             tempfile_str.as_str(),
@@ -101,8 +100,7 @@ async fn query_dataframe(df: &DataFrame) -> Result<(), DataFusionError> {
 // Setup encryption and decryption properties
 fn setup_encryption(
     parquet_df: &DataFrame,
-) -> Result<(Arc<FileEncryptionProperties>, Arc<FileDecryptionProperties>), DataFusionError>
-{
+) -> Result<(FileEncryptionProperties, FileDecryptionProperties), DataFusionError> {
     let schema = parquet_df.schema();
     let footer_key = b"0123456789012345".to_vec(); // 128bit/16
     let column_key = b"1234567890123450".to_vec(); // 128bit/16

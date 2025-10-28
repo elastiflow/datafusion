@@ -32,13 +32,12 @@ use super::{
 };
 use crate::execution_plan::{CardinalityEffect, EvaluationType, SchedulingType};
 use crate::hash_utils::create_hashes;
-use crate::metrics::{BaselineMetrics, SpillMetrics};
+use crate::metrics::BaselineMetrics;
 use crate::projection::{all_columns, make_with_child, update_expr, ProjectionExec};
 use crate::repartition::distributor_channels::{
     channels, partition_aware_channels, DistributionReceiver, DistributionSender,
 };
 use crate::sorts::streaming_merge::StreamingMergeBuilder;
-use crate::spill::spill_manager::SpillManager;
 use crate::stream::RecordBatchStreamAdapter;
 use crate::{DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, Statistics};
 
@@ -51,7 +50,6 @@ use datafusion_common::utils::transpose;
 use datafusion_common::{internal_err, ColumnStatistics, HashMap};
 use datafusion_common::{not_impl_err, DataFusionError, Result};
 use datafusion_common_runtime::SpawnedTask;
-use datafusion_execution::disk_manager::RefCountedTempFile;
 use datafusion_execution::memory_pool::MemoryConsumer;
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::{EquivalenceProperties, PhysicalExpr};
@@ -68,42 +66,22 @@ use parking_lot::Mutex;
 
 mod distributor_channels;
 
-/// A batch in the repartition queue - either in memory or spilled to disk
-#[derive(Debug)]
-enum RepartitionBatch {
-    /// Batch held in memory (counts against memory reservation)
-    Memory(RecordBatch),
-    /// Batch spilled to disk (one file per batch for queue semantics)
-    /// File automatically deleted when dropped via reference counting
-    /// The size field stores the original batch size for validation when reading back
-    Spilled {
-        spill_file: RefCountedTempFile,
-        size: usize,
-    },
-}
-
-type MaybeBatch = Option<Result<RepartitionBatch>>;
+type MaybeBatch = Option<Result<RecordBatch>>;
 type InputPartitionsToCurrentPartitionSender = Vec<DistributionSender<MaybeBatch>>;
 type InputPartitionsToCurrentPartitionReceiver = Vec<DistributionReceiver<MaybeBatch>>;
-
-/// Channels and resources for a single output partition
-#[derive(Debug)]
-struct PartitionChannels {
-    /// Senders for each input partition to send data to this output partition
-    tx: InputPartitionsToCurrentPartitionSender,
-    /// Receivers for each input partition sending data to this output partition
-    rx: InputPartitionsToCurrentPartitionReceiver,
-    /// Memory reservation for this output partition
-    reservation: SharedMemoryReservation,
-    /// Spill manager for handling disk spills for this output partition
-    spill_manager: Arc<SpillManager>,
-}
 
 #[derive(Debug)]
 struct ConsumingInputStreamsState {
     /// Channels for sending batches from input partitions to output partitions.
     /// Key is the partition number.
-    channels: HashMap<usize, PartitionChannels>,
+    channels: HashMap<
+        usize,
+        (
+            InputPartitionsToCurrentPartitionSender,
+            InputPartitionsToCurrentPartitionReceiver,
+            SharedMemoryReservation,
+        ),
+    >,
 
     /// Helper that ensures that that background job is killed once it is no longer needed.
     abort_helper: Arc<Vec<SpawnedTask<()>>>,
@@ -183,8 +161,8 @@ impl RepartitionExecState {
         let streams_and_metrics = match self {
             RepartitionExecState::NotInitialized => {
                 self.ensure_input_streams_initialized(
-                    Arc::clone(&input),
-                    metrics.clone(),
+                    input,
+                    metrics,
                     partitioning.partition_count(),
                     Arc::clone(&context),
                 )?;
@@ -227,24 +205,9 @@ impl RepartitionExecState {
         for (partition, (tx, rx)) in txs.into_iter().zip(rxs).enumerate() {
             let reservation = Arc::new(Mutex::new(
                 MemoryConsumer::new(format!("{name}[{partition}]"))
-                    .with_can_spill(true)
                     .register(context.memory_pool()),
             ));
-            let spill_metrics = SpillMetrics::new(&metrics, partition);
-            let spill_manager = Arc::new(SpillManager::new(
-                Arc::clone(&context.runtime_env()),
-                spill_metrics,
-                input.schema(),
-            ));
-            channels.insert(
-                partition,
-                PartitionChannels {
-                    tx,
-                    rx,
-                    reservation,
-                    spill_manager,
-                },
-            );
+            channels.insert(partition, (tx, rx, reservation));
         }
 
         // launch one async task per *input* partition
@@ -254,15 +217,8 @@ impl RepartitionExecState {
         {
             let txs: HashMap<_, _> = channels
                 .iter()
-                .map(|(partition, channels)| {
-                    (
-                        *partition,
-                        (
-                            channels.tx[i].clone(),
-                            Arc::clone(&channels.reservation),
-                            Arc::clone(&channels.spill_manager),
-                        ),
-                    )
+                .map(|(partition, (tx, _rx, reservation))| {
+                    (*partition, (tx[i].clone(), Arc::clone(reservation)))
                 })
                 .collect();
 
@@ -278,9 +234,7 @@ impl RepartitionExecState {
             let wait_for_task = SpawnedTask::spawn(RepartitionExec::wait_for_task(
                 input_task,
                 txs.into_iter()
-                    .map(|(partition, (tx, _reservation, _spill_manager))| {
-                        (partition, tx)
-                    })
+                    .map(|(partition, (tx, _reservation))| (partition, tx))
                     .collect(),
             ));
             spawned_tasks.push(wait_for_task);
@@ -721,7 +675,7 @@ impl ExecutionPlan for RepartitionExec {
             let num_input_partitions = input.output_partitioning().partition_count();
 
             // lock scope
-            let (mut rx, reservation, spill_manager, abort_helper) = {
+            let (mut rx, reservation, abort_helper) = {
                 // lock mutexes
                 let mut state = state.lock();
                 let state = state.consume_input_streams(
@@ -735,22 +689,12 @@ impl ExecutionPlan for RepartitionExec {
 
                 // now return stream for the specified *output* partition which will
                 // read from the channel
-                let PartitionChannels {
-                    rx,
-                    reservation,
-                    spill_manager,
-                    ..
-                } = state
+                let (_tx, rx, reservation) = state
                     .channels
                     .remove(&partition)
                     .expect("partition not used yet");
 
-                (
-                    rx,
-                    reservation,
-                    spill_manager,
-                    Arc::clone(&state.abort_helper),
-                )
+                (rx, reservation, Arc::clone(&state.abort_helper))
             };
 
             trace!(
@@ -767,8 +711,6 @@ impl ExecutionPlan for RepartitionExec {
                             receiver,
                             _drop_helper: Arc::clone(&abort_helper),
                             reservation: Arc::clone(&reservation),
-                            spill_manager: Arc::clone(&spill_manager),
-                            state: RepartitionStreamState::ReceivingFromChannel,
                         }) as SendableRecordBatchStream
                     })
                     .collect::<Vec<_>>();
@@ -797,8 +739,6 @@ impl ExecutionPlan for RepartitionExec {
                     input: rx.swap_remove(0),
                     _drop_helper: abort_helper,
                     reservation,
-                    spill_manager,
-                    state: RepartitionStreamState::ReceivingFromChannel,
                 }) as SendableRecordBatchStream)
             }
         })
@@ -1039,11 +979,7 @@ impl RepartitionExec {
         mut stream: SendableRecordBatchStream,
         mut output_channels: HashMap<
             usize,
-            (
-                DistributionSender<MaybeBatch>,
-                SharedMemoryReservation,
-                Arc<SpillManager>,
-            ),
+            (DistributionSender<MaybeBatch>, SharedMemoryReservation),
         >,
         partitioning: Partitioning,
         metrics: RepartitionMetrics,
@@ -1065,49 +1001,18 @@ impl RepartitionExec {
                 None => break,
             };
 
-            // Handle empty batch
-            if batch.num_rows() == 0 {
-                continue;
-            }
-
             for res in partitioner.partition_iter(batch)? {
                 let (partition, batch) = res?;
                 let size = batch.get_array_memory_size();
 
                 let timer = metrics.send_time[partition].timer();
                 // if there is still a receiver, send to it
-                if let Some((tx, reservation, spill_manager)) =
-                    output_channels.get_mut(&partition)
-                {
-                    let (batch_to_send, is_memory_batch) =
-                        match reservation.lock().try_grow(size) {
-                            Ok(_) => {
-                                // Memory available - send in-memory batch
-                                (RepartitionBatch::Memory(batch), true)
-                            }
-                            Err(_) => {
-                                // We're memory limited - spill this single batch to its own file
-                                let spill_file = spill_manager
-                                    .spill_record_batch_and_finish(
-                                        &[batch],
-                                        &format!(
-                                            "RepartitionExec spill partition {partition}"
-                                        ),
-                                    )?
-                                    // Note that we handled empty batch above, so this is safe
-                                    .expect("non-empty batch should produce spill file");
+                if let Some((tx, reservation)) = output_channels.get_mut(&partition) {
+                    reservation.lock().try_grow(size)?;
 
-                                // Store size for validation when reading back
-                                (RepartitionBatch::Spilled { spill_file, size }, false)
-                            }
-                        };
-
-                    if tx.send(Some(Ok(batch_to_send))).await.is_err() {
+                    if tx.send(Some(Ok(batch))).await.is_err() {
                         // If the other end has hung up, it was an early shutdown (e.g. LIMIT)
-                        // Only shrink memory if it was a memory batch
-                        if is_memory_batch {
-                            reservation.lock().shrink(size);
-                        }
+                        reservation.lock().shrink(size);
                         output_channels.remove(&partition);
                     }
                 }
@@ -1188,13 +1093,6 @@ impl RepartitionExec {
     }
 }
 
-enum RepartitionStreamState {
-    /// Waiting for next item from channel
-    ReceivingFromChannel,
-    /// Reading a spilled batch from disk (stream reads via tokio::fs)
-    ReadingSpilledBatch(SendableRecordBatchStream),
-}
-
 struct RepartitionStream {
     /// Number of input partitions that will be sending batches to this output channel
     num_input_partitions: usize,
@@ -1213,12 +1111,6 @@ struct RepartitionStream {
 
     /// Memory reservation.
     reservation: SharedMemoryReservation,
-
-    /// Spill manager for reading spilled batches
-    spill_manager: Arc<SpillManager>,
-
-    /// Current state of the stream
-    state: RepartitionStreamState,
 }
 
 impl Stream for RepartitionStream {
@@ -1229,66 +1121,32 @@ impl Stream for RepartitionStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         loop {
-            match &mut self.state {
-                RepartitionStreamState::ReceivingFromChannel => {
-                    let value = futures::ready!(self.input.recv().poll_unpin(cx));
-                    match value {
-                        Some(Some(v)) => match v {
-                            Ok(RepartitionBatch::Memory(batch)) => {
-                                // Release memory and return
-                                self.reservation
-                                    .lock()
-                                    .shrink(batch.get_array_memory_size());
-                                return Poll::Ready(Some(Ok(batch)));
-                            }
-                            Ok(RepartitionBatch::Spilled { spill_file, size }) => {
-                                // Read from disk - SpillReaderStream uses tokio::fs internally
-                                // Pass the original size for validation
-                                let stream = self
-                                    .spill_manager
-                                    .read_spill_as_stream(spill_file, Some(size))?;
-                                self.state =
-                                    RepartitionStreamState::ReadingSpilledBatch(stream);
-                                // Continue loop to poll the stream immediately
-                            }
-                            Err(e) => {
-                                return Poll::Ready(Some(Err(e)));
-                            }
-                        },
-                        Some(None) => {
-                            self.num_input_partitions_processed += 1;
+            match self.input.recv().poll_unpin(cx) {
+                Poll::Ready(Some(Some(v))) => {
+                    if let Ok(batch) = &v {
+                        self.reservation
+                            .lock()
+                            .shrink(batch.get_array_memory_size());
+                    }
 
-                            if self.num_input_partitions
-                                == self.num_input_partitions_processed
-                            {
-                                // all input partitions have finished sending batches
-                                return Poll::Ready(None);
-                            } else {
-                                // other partitions still have data to send
-                                continue;
-                            }
-                        }
-                        None => {
-                            return Poll::Ready(None);
-                        }
+                    return Poll::Ready(Some(v));
+                }
+                Poll::Ready(Some(None)) => {
+                    self.num_input_partitions_processed += 1;
+
+                    if self.num_input_partitions == self.num_input_partitions_processed {
+                        // all input partitions have finished sending batches
+                        return Poll::Ready(None);
+                    } else {
+                        // other partitions still have data to send
+                        continue;
                     }
                 }
-                RepartitionStreamState::ReadingSpilledBatch(stream) => {
-                    match futures::ready!(stream.poll_next_unpin(cx)) {
-                        Some(Ok(batch)) => {
-                            // Return batch and stay in ReadingSpilledBatch state to read more batches
-                            return Poll::Ready(Some(Ok(batch)));
-                        }
-                        Some(Err(e)) => {
-                            self.state = RepartitionStreamState::ReceivingFromChannel;
-                            return Poll::Ready(Some(Err(e)));
-                        }
-                        None => {
-                            // Spill stream ended - go back to receiving from channel
-                            self.state = RepartitionStreamState::ReceivingFromChannel;
-                            continue;
-                        }
-                    }
+                Poll::Ready(None) => {
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => {
+                    return Poll::Pending;
                 }
             }
         }
@@ -1316,12 +1174,6 @@ struct PerPartitionStream {
 
     /// Memory reservation.
     reservation: SharedMemoryReservation,
-
-    /// Spill manager for reading spilled batches
-    spill_manager: Arc<SpillManager>,
-
-    /// Current state of the stream
-    state: RepartitionStreamState,
 }
 
 impl Stream for PerPartitionStream {
@@ -1331,59 +1183,21 @@ impl Stream for PerPartitionStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        loop {
-            match &mut self.state {
-                RepartitionStreamState::ReceivingFromChannel => {
-                    let value = futures::ready!(self.receiver.recv().poll_unpin(cx));
-                    match value {
-                        Some(Some(v)) => match v {
-                            Ok(RepartitionBatch::Memory(batch)) => {
-                                // Release memory and return
-                                self.reservation
-                                    .lock()
-                                    .shrink(batch.get_array_memory_size());
-                                return Poll::Ready(Some(Ok(batch)));
-                            }
-                            Ok(RepartitionBatch::Spilled { spill_file, size }) => {
-                                // Read from disk - SpillReaderStream uses tokio::fs internally
-                                // Pass the original size for validation
-                                let stream = self
-                                    .spill_manager
-                                    .read_spill_as_stream(spill_file, Some(size))?;
-                                self.state =
-                                    RepartitionStreamState::ReadingSpilledBatch(stream);
-                                // Continue loop to poll the stream immediately
-                            }
-                            Err(e) => {
-                                return Poll::Ready(Some(Err(e)));
-                            }
-                        },
-                        Some(None) => {
-                            // Input partition has finished sending batches
-                            return Poll::Ready(None);
-                        }
-                        None => return Poll::Ready(None),
-                    }
+        match self.receiver.recv().poll_unpin(cx) {
+            Poll::Ready(Some(Some(v))) => {
+                if let Ok(batch) = &v {
+                    self.reservation
+                        .lock()
+                        .shrink(batch.get_array_memory_size());
                 }
-
-                RepartitionStreamState::ReadingSpilledBatch(stream) => {
-                    match futures::ready!(stream.poll_next_unpin(cx)) {
-                        Some(Ok(batch)) => {
-                            // Return batch and stay in ReadingSpilledBatch state to read more batches
-                            return Poll::Ready(Some(Ok(batch)));
-                        }
-                        Some(Err(e)) => {
-                            self.state = RepartitionStreamState::ReceivingFromChannel;
-                            return Poll::Ready(Some(Err(e)));
-                        }
-                        None => {
-                            // Spill stream ended - go back to receiving from channel
-                            self.state = RepartitionStreamState::ReceivingFromChannel;
-                            continue;
-                        }
-                    }
-                }
+                Poll::Ready(Some(v))
             }
+            Poll::Ready(Some(None)) => {
+                // Input partition has finished sending batches
+                Poll::Ready(None)
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -1415,8 +1229,8 @@ mod tests {
     use arrow::array::{ArrayRef, StringArray, UInt32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion_common::cast::as_string_array;
-    use datafusion_common::exec_err;
     use datafusion_common::test_util::batches_to_sort_string;
+    use datafusion_common::{arrow_datafusion_err, exec_err};
     use datafusion_common_runtime::JoinSet;
     use datafusion_execution::runtime_env::RuntimeEnvBuilder;
     use insta::assert_snapshot;
@@ -1898,209 +1712,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repartition_with_spilling() -> Result<()> {
-        // Test that repartition successfully spills to disk when memory is constrained
-        let schema = test_schema();
-        let partition = create_vec_batches(50);
-        let input_partitions = vec![partition];
-        let partitioning = Partitioning::RoundRobinBatch(4);
-
-        // Set up context with very tight memory limit to force spilling
-        let runtime = RuntimeEnvBuilder::default()
-            .with_memory_limit(1, 1.0)
-            .build_arc()?;
-
-        let task_ctx = TaskContext::default().with_runtime(runtime);
-        let task_ctx = Arc::new(task_ctx);
-
-        // create physical plan
-        let exec =
-            TestMemoryExec::try_new_exec(&input_partitions, Arc::clone(&schema), None)?;
-        let exec = RepartitionExec::try_new(exec, partitioning)?;
-
-        // Collect all partitions - should succeed by spilling to disk
-        let mut total_rows = 0;
-        for i in 0..exec.partitioning().partition_count() {
-            let mut stream = exec.execute(i, Arc::clone(&task_ctx))?;
-            while let Some(result) = stream.next().await {
-                let batch = result?;
-                total_rows += batch.num_rows();
-            }
-        }
-
-        // Verify we got all the data (50 batches * 8 rows each)
-        assert_eq!(total_rows, 50 * 8);
-
-        // Verify spilling metrics to confirm spilling actually happened
-        let metrics = exec.metrics().unwrap();
-        assert!(
-            metrics.spill_count().unwrap() > 0,
-            "Expected spill_count > 0, but got {:?}",
-            metrics.spill_count()
-        );
-        println!("Spilled {} times", metrics.spill_count().unwrap());
-        assert!(
-            metrics.spilled_bytes().unwrap() > 0,
-            "Expected spilled_bytes > 0, but got {:?}",
-            metrics.spilled_bytes()
-        );
-        println!(
-            "Spilled {} bytes in {} spills",
-            metrics.spilled_bytes().unwrap(),
-            metrics.spill_count().unwrap()
-        );
-        assert!(
-            metrics.spilled_rows().unwrap() > 0,
-            "Expected spilled_rows > 0, but got {:?}",
-            metrics.spilled_rows()
-        );
-        println!("Spilled {} rows", metrics.spilled_rows().unwrap());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn repartition_with_partial_spilling() -> Result<()> {
-        // Test that repartition can handle partial spilling (some batches in memory, some spilled)
-        let schema = test_schema();
-        let partition = create_vec_batches(50);
-        let input_partitions = vec![partition];
-        let partitioning = Partitioning::RoundRobinBatch(4);
-
-        // Set up context with moderate memory limit to force partial spilling
-        // 2KB should allow some batches in memory but force others to spill
-        let runtime = RuntimeEnvBuilder::default()
-            .with_memory_limit(2 * 1024, 1.0)
-            .build_arc()?;
-
-        let task_ctx = TaskContext::default().with_runtime(runtime);
-        let task_ctx = Arc::new(task_ctx);
-
-        // create physical plan
-        let exec =
-            TestMemoryExec::try_new_exec(&input_partitions, Arc::clone(&schema), None)?;
-        let exec = RepartitionExec::try_new(exec, partitioning)?;
-
-        // Collect all partitions - should succeed with partial spilling
-        let mut total_rows = 0;
-        for i in 0..exec.partitioning().partition_count() {
-            let mut stream = exec.execute(i, Arc::clone(&task_ctx))?;
-            while let Some(result) = stream.next().await {
-                let batch = result?;
-                total_rows += batch.num_rows();
-            }
-        }
-
-        // Verify we got all the data (50 batches * 8 rows each)
-        assert_eq!(total_rows, 50 * 8);
-
-        // Verify partial spilling metrics
-        let metrics = exec.metrics().unwrap();
-        let spill_count = metrics.spill_count().unwrap();
-        let spilled_rows = metrics.spilled_rows().unwrap();
-        let spilled_bytes = metrics.spilled_bytes().unwrap();
-
-        assert!(
-            spill_count > 0,
-            "Expected some spilling to occur, but got spill_count={spill_count}"
-        );
-        assert!(
-            spilled_rows > 0 && spilled_rows < total_rows,
-            "Expected partial spilling (0 < spilled_rows < {total_rows}), but got spilled_rows={spilled_rows}"
-        );
-        assert!(
-            spilled_bytes > 0,
-            "Expected some bytes to be spilled, but got spilled_bytes={spilled_bytes}"
-        );
-
-        println!(
-            "Partial spilling: spilled {} out of {} rows ({:.1}%) in {} spills, {} bytes",
-            spilled_rows,
-            total_rows,
-            (spilled_rows as f64 / total_rows as f64) * 100.0,
-            spill_count,
-            spilled_bytes
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn repartition_without_spilling() -> Result<()> {
-        // Test that repartition does not spill when there's ample memory
-        let schema = test_schema();
-        let partition = create_vec_batches(50);
-        let input_partitions = vec![partition];
-        let partitioning = Partitioning::RoundRobinBatch(4);
-
-        // Set up context with generous memory limit - no spilling should occur
-        let runtime = RuntimeEnvBuilder::default()
-            .with_memory_limit(10 * 1024 * 1024, 1.0) // 10MB
-            .build_arc()?;
-
-        let task_ctx = TaskContext::default().with_runtime(runtime);
-        let task_ctx = Arc::new(task_ctx);
-
-        // create physical plan
-        let exec =
-            TestMemoryExec::try_new_exec(&input_partitions, Arc::clone(&schema), None)?;
-        let exec = RepartitionExec::try_new(exec, partitioning)?;
-
-        // Collect all partitions - should succeed without spilling
-        let mut total_rows = 0;
-        for i in 0..exec.partitioning().partition_count() {
-            let mut stream = exec.execute(i, Arc::clone(&task_ctx))?;
-            while let Some(result) = stream.next().await {
-                let batch = result?;
-                total_rows += batch.num_rows();
-            }
-        }
-
-        // Verify we got all the data (50 batches * 8 rows each)
-        assert_eq!(total_rows, 50 * 8);
-
-        // Verify no spilling occurred
-        let metrics = exec.metrics().unwrap();
-        assert_eq!(
-            metrics.spill_count(),
-            Some(0),
-            "Expected no spilling, but got spill_count={:?}",
-            metrics.spill_count()
-        );
-        assert_eq!(
-            metrics.spilled_bytes(),
-            Some(0),
-            "Expected no bytes spilled, but got spilled_bytes={:?}",
-            metrics.spilled_bytes()
-        );
-        assert_eq!(
-            metrics.spilled_rows(),
-            Some(0),
-            "Expected no rows spilled, but got spilled_rows={:?}",
-            metrics.spilled_rows()
-        );
-
-        println!("No spilling occurred - all data processed in memory");
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn oom() -> Result<()> {
-        use datafusion_execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
-
-        // Test that repartition fails with OOM when disk manager is disabled
+        // define input partitions
         let schema = test_schema();
         let partition = create_vec_batches(50);
         let input_partitions = vec![partition];
         let partitioning = Partitioning::RoundRobinBatch(4);
 
-        // Setup context with memory limit but NO disk manager (explicitly disabled)
+        // setup up context
         let runtime = RuntimeEnvBuilder::default()
             .with_memory_limit(1, 1.0)
-            .with_disk_manager_builder(
-                DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled),
-            )
             .build_arc()?;
 
         let task_ctx = TaskContext::default().with_runtime(runtime);
@@ -2111,10 +1732,11 @@ mod tests {
             TestMemoryExec::try_new_exec(&input_partitions, Arc::clone(&schema), None)?;
         let exec = RepartitionExec::try_new(exec, partitioning)?;
 
-        // Attempt to execute - should fail with ResourcesExhausted error
+        // pull partitions
         for i in 0..exec.partitioning().partition_count() {
             let mut stream = exec.execute(i, Arc::clone(&task_ctx))?;
-            let err = stream.next().await.unwrap().unwrap_err();
+            let err =
+                arrow_datafusion_err!(stream.next().await.unwrap().unwrap_err().into());
             let err = err.find_root();
             assert!(
                 matches!(err, DataFusionError::ResourcesExhausted(_)),
@@ -2160,12 +1782,16 @@ mod test {
     /// `$PLAN`: the plan to optimized
     ///
     macro_rules! assert_plan {
-        ($PLAN: expr,  @ $EXPECTED: expr) => {
+        ($EXPECTED_PLAN_LINES: expr,  $PLAN: expr) => {
             let formatted = crate::displayable($PLAN).indent(true).to_string();
+            let actual: Vec<&str> = formatted.trim().lines().collect();
 
-            insta::assert_snapshot!(
-                formatted,
-                @$EXPECTED
+            let expected_plan_lines: Vec<&str> = $EXPECTED_PLAN_LINES
+                .iter().map(|s| *s).collect();
+
+            assert_eq!(
+                expected_plan_lines, actual,
+                "\n**Original Plan Mismatch\n\nexpected:\n\n{expected_plan_lines:#?}\nactual:\n\n{actual:#?}\n\n"
             );
         };
     }
@@ -2182,12 +1808,13 @@ mod test {
             .with_preserve_order();
 
         // Repartition should preserve order
-        assert_plan!(&exec, @r"
-        RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=2, preserve_order=true, sort_exprs=c0@0 ASC
-          UnionExec
-            DataSourceExec: partitions=1, partition_sizes=[0], output_ordering=c0@0 ASC
-            DataSourceExec: partitions=1, partition_sizes=[0], output_ordering=c0@0 ASC
-        ");
+        let expected_plan = [
+            "RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=2, preserve_order=true, sort_exprs=c0@0 ASC",
+            "  UnionExec",
+            "    DataSourceExec: partitions=1, partition_sizes=[0], output_ordering=c0@0 ASC",
+            "    DataSourceExec: partitions=1, partition_sizes=[0], output_ordering=c0@0 ASC",
+        ];
+        assert_plan!(expected_plan, &exec);
         Ok(())
     }
 
@@ -2197,15 +1824,16 @@ mod test {
         let sort_exprs = sort_exprs(&schema);
         let source = sorted_memory_exec(&schema, sort_exprs);
         // output is sorted, but has only a single partition, so no need to sort
-        let exec = RepartitionExec::try_new(source, Partitioning::RoundRobinBatch(10))?
+        let exec = RepartitionExec::try_new(source, Partitioning::RoundRobinBatch(10))
+            .unwrap()
             .with_preserve_order();
 
         // Repartition should not preserve order
-        assert_plan!(&exec, @r"
-        RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1
-          DataSourceExec: partitions=1, partition_sizes=[0], output_ordering=c0@0 ASC
-        ");
-
+        let expected_plan = [
+            "RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=1",
+            "  DataSourceExec: partitions=1, partition_sizes=[0], output_ordering=c0@0 ASC",
+        ];
+        assert_plan!(expected_plan, &exec);
         Ok(())
     }
 
@@ -2220,12 +1848,13 @@ mod test {
             .with_preserve_order();
 
         // Repartition should not preserve order, as there is no order to preserve
-        assert_plan!(&exec, @r"
-        RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=2
-          UnionExec
-            DataSourceExec: partitions=1, partition_sizes=[0]
-            DataSourceExec: partitions=1, partition_sizes=[0]
-        ");
+        let expected_plan = [
+            "RepartitionExec: partitioning=RoundRobinBatch(10), input_partitions=2",
+            "  UnionExec",
+            "    DataSourceExec: partitions=1, partition_sizes=[0]",
+            "    DataSourceExec: partitions=1, partition_sizes=[0]",
+        ];
+        assert_plan!(expected_plan, &exec);
         Ok(())
     }
 
@@ -2240,10 +1869,11 @@ mod test {
             .unwrap();
 
         // Repartition should not preserve order
-        assert_plan!(exec.as_ref(), @r"
-        RepartitionExec: partitioning=RoundRobinBatch(20), input_partitions=1
-          DataSourceExec: partitions=1, partition_sizes=[0], output_ordering=c0@0 ASC
-        ");
+        let expected_plan = [
+            "RepartitionExec: partitioning=RoundRobinBatch(20), input_partitions=1",
+            "  DataSourceExec: partitions=1, partition_sizes=[0], output_ordering=c0@0 ASC",
+        ];
+        assert_plan!(expected_plan, exec.as_ref());
         Ok(())
     }
 

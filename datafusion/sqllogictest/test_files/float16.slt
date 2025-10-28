@@ -51,14 +51,13 @@ NULL NULL NULL NULL NULL NULL
 NaN NaN NaN NaN NaN NaN
 
 # Try coercing with literal NULL
-query R
+query error
 select column1 + NULL from float16s;
 ----
-NULL
-NULL
-NULL
-NULL
-NULL
+DataFusion error: type_coercion
+caused by
+Error during planning: Cannot automatically convert Null to Float16
+
 
 # Test coercions with equality
 query BBBBBB
@@ -79,14 +78,11 @@ false false false false false false
 
 
 # Try coercing with literal NULL
-query B
+query error
 select column1 = NULL from float16s;
 ----
-NULL
-NULL
-NULL
-NULL
-NULL
+DataFusion error: Error during planning: Cannot infer common argument type for comparison operation Float16 = Null
+
 
 # Cleanup
 statement ok

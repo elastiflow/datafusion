@@ -41,18 +41,7 @@ You can cast a SQL expression to a specific Arrow type using the `arrow_cast` fu
 For example, to cast the output of `now()` to a `Timestamp` with second precision:
 
 ```sql
-select arrow_cast(now(), 'Timestamp(s)') as "now()";
-+---------------------+
-| now()               |
-+---------------------+
-| 2025-10-24T20:02:45 |
-+---------------------+
-```
-
-The older syntax still works as well:
-
-```sql
-select arrow_cast(now(), 'Timestamp(Second, None)') as "now()";
+select arrow_cast(now(), 'Timestamp(Second, None)');
 +---------------------+
 | now()               |
 +---------------------+

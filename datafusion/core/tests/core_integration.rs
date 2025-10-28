@@ -21,9 +21,6 @@ mod sql;
 /// Run all tests that are found in the `dataframe` directory
 mod dataframe;
 
-/// Run all tests that are found in the `datasource` directory
-mod datasource;
-
 /// Run all tests that are found in the `macro_hygiene` directory
 mod macro_hygiene;
 

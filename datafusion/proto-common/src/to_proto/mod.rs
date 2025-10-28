@@ -28,9 +28,7 @@ use arrow::datatypes::{
     DataType, Field, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalUnit, Schema,
     SchemaRef, TimeUnit, UnionMode,
 };
-use arrow::ipc::writer::{
-    CompressionContext, DictionaryTracker, IpcDataGenerator, IpcWriteOptions,
-};
+use arrow::ipc::writer::{DictionaryTracker, IpcDataGenerator};
 use datafusion_common::{
     config::{
         CsvOptions, JsonOptions, ParquetColumnOptions, ParquetOptions,
@@ -1020,15 +1018,8 @@ fn encode_scalar_nested_value(
 
     let gen = IpcDataGenerator {};
     let mut dict_tracker = DictionaryTracker::new(false);
-    let write_options = IpcWriteOptions::default();
-    let mut compression_context = CompressionContext::default();
     let (encoded_dictionaries, encoded_message) = gen
-        .encode(
-            &batch,
-            &mut dict_tracker,
-            &write_options,
-            &mut compression_context,
-        )
+        .encoded_batch(&batch, &mut dict_tracker, &Default::default())
         .map_err(|e| {
             Error::General(format!("Error encoding ScalarValue::List as IPC: {e}"))
         })?;

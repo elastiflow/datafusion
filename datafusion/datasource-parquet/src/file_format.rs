@@ -38,6 +38,8 @@ use datafusion_datasource::write::demux::DemuxedStreamReceiver;
 
 use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::config::{ConfigField, ConfigFileType, TableParquetOptions};
+#[cfg(feature = "parquet_encryption")]
+use datafusion_common::encryption::map_config_decryption_to_decryption;
 use datafusion_common::encryption::FileDecryptionProperties;
 use datafusion_common::parsers::CompressionTypeVariant;
 use datafusion_common::{
@@ -57,13 +59,11 @@ use datafusion_physical_expr_common::sort_expr::LexRequirement;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
 use datafusion_session::Session;
 
-use crate::metadata::DFParquetMetadata;
 use crate::reader::CachedParquetFileReaderFactory;
 use crate::source::{parse_coerce_int96_string, ParquetSource};
 use async_trait::async_trait;
 use bytes::Bytes;
 use datafusion_datasource::source::DataSourceExec;
-use datafusion_execution::cache::cache_manager::FileMetadataCache;
 use datafusion_execution::runtime_env::RuntimeEnv;
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, TryStreamExt};
@@ -77,12 +77,14 @@ use parquet::arrow::arrow_writer::{
 use parquet::arrow::async_reader::MetadataFetch;
 use parquet::arrow::{ArrowWriter, AsyncArrowWriter};
 use parquet::basic::Type;
-#[cfg(feature = "parquet_encryption")]
-use parquet::encryption::encrypt::FileEncryptionProperties;
+
+use crate::metadata::DFParquetMetadata;
+use datafusion_execution::cache::cache_manager::FileMetadataCache;
 use parquet::errors::ParquetError;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::file::writer::SerializedFileWriter;
+use parquet::format::FileMetaData;
 use parquet::schema::types::SchemaDescriptor;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -304,23 +306,25 @@ async fn get_file_decryption_properties(
     state: &dyn Session,
     options: &TableParquetOptions,
     file_path: &Path,
-) -> Result<Option<Arc<FileDecryptionProperties>>> {
-    Ok(match &options.crypto.file_decryption {
-        Some(cfd) => Some(Arc::new(FileDecryptionProperties::from(cfd.clone()))),
-        None => match &options.crypto.factory_id {
-            Some(factory_id) => {
-                let factory =
-                    state.runtime_env().parquet_encryption_factory(factory_id)?;
-                factory
-                    .get_file_decryption_properties(
-                        &options.crypto.factory_options,
-                        file_path,
-                    )
-                    .await?
-            }
-            None => None,
-        },
-    })
+) -> Result<Option<FileDecryptionProperties>> {
+    let file_decryption_properties: Option<FileDecryptionProperties> =
+        match &options.crypto.file_decryption {
+            Some(cfd) => Some(map_config_decryption_to_decryption(cfd)),
+            None => match &options.crypto.factory_id {
+                Some(factory_id) => {
+                    let factory =
+                        state.runtime_env().parquet_encryption_factory(factory_id)?;
+                    factory
+                        .get_file_decryption_properties(
+                            &options.crypto.factory_options,
+                            file_path,
+                        )
+                        .await?
+                }
+                None => None,
+            },
+        };
+    Ok(file_decryption_properties)
 }
 
 #[cfg(not(feature = "parquet_encryption"))]
@@ -328,7 +332,7 @@ async fn get_file_decryption_properties(
     _state: &dyn Session,
     _options: &TableParquetOptions,
     _file_path: &Path,
-) -> Result<Option<Arc<FileDecryptionProperties>>> {
+) -> Result<Option<FileDecryptionProperties>> {
     Ok(None)
 }
 
@@ -381,7 +385,7 @@ impl FileFormat for ParquetFormat {
                 .await?;
                 let result = DFParquetMetadata::new(store.as_ref(), object)
                     .with_metadata_size_hint(self.metadata_size_hint())
-                    .with_decryption_properties(file_decryption_properties)
+                    .with_decryption_properties(file_decryption_properties.as_ref())
                     .with_file_metadata_cache(Some(Arc::clone(&file_metadata_cache)))
                     .with_coerce_int96(coerce_int96)
                     .fetch_schema_with_location()
@@ -442,7 +446,7 @@ impl FileFormat for ParquetFormat {
             state.runtime_env().cache_manager.get_file_metadata_cache();
         DFParquetMetadata::new(store, object)
             .with_metadata_size_hint(self.metadata_size_hint())
-            .with_decryption_properties(file_decryption_properties)
+            .with_decryption_properties(file_decryption_properties.as_ref())
             .with_file_metadata_cache(Some(file_metadata_cache))
             .fetch_statistics(&table_schema)
             .await
@@ -1023,10 +1027,9 @@ pub async fn fetch_parquet_metadata(
     store: &dyn ObjectStore,
     object_meta: &ObjectMeta,
     size_hint: Option<usize>,
-    decryption_properties: Option<&FileDecryptionProperties>,
+    #[allow(unused)] decryption_properties: Option<&FileDecryptionProperties>,
     file_metadata_cache: Option<Arc<dyn FileMetadataCache>>,
 ) -> Result<Arc<ParquetMetaData>> {
-    let decryption_properties = decryption_properties.cloned().map(Arc::new);
     DFParquetMetadata::new(store, object_meta)
         .with_metadata_size_hint(size_hint)
         .with_decryption_properties(decryption_properties)
@@ -1050,7 +1053,6 @@ pub async fn fetch_statistics(
     decryption_properties: Option<&FileDecryptionProperties>,
     file_metadata_cache: Option<Arc<dyn FileMetadataCache>>,
 ) -> Result<Statistics> {
-    let decryption_properties = decryption_properties.cloned().map(Arc::new);
     DFParquetMetadata::new(store, file)
         .with_metadata_size_hint(metadata_size_hint)
         .with_decryption_properties(decryption_properties)
@@ -1078,7 +1080,7 @@ pub struct ParquetSink {
     parquet_options: TableParquetOptions,
     /// File metadata from successfully produced parquet files. The Mutex is only used
     /// to allow inserting to HashMap from behind borrowed reference in DataSink::write_all.
-    written: Arc<parking_lot::Mutex<HashMap<Path, ParquetMetaData>>>,
+    written: Arc<parking_lot::Mutex<HashMap<Path, FileMetaData>>>,
 }
 
 impl Debug for ParquetSink {
@@ -1115,7 +1117,7 @@ impl ParquetSink {
 
     /// Retrieve the file metadata for the written files, keyed to the path
     /// which may be partitioned (in the case of hive style partitioning).
-    pub fn written(&self) -> HashMap<Path, ParquetMetaData> {
+    pub fn written(&self) -> HashMap<Path, FileMetaData> {
         self.written.lock().clone()
     }
 
@@ -1139,7 +1141,7 @@ impl ParquetSink {
         builder = set_writer_encryption_properties(
             builder,
             runtime,
-            parquet_opts,
+            &parquet_opts,
             schema,
             path,
         )
@@ -1187,15 +1189,14 @@ impl ParquetSink {
 async fn set_writer_encryption_properties(
     builder: WriterPropertiesBuilder,
     runtime: &Arc<RuntimeEnv>,
-    parquet_opts: TableParquetOptions,
+    parquet_opts: &TableParquetOptions,
     schema: &Arc<Schema>,
     path: &Path,
 ) -> Result<WriterPropertiesBuilder> {
-    if let Some(file_encryption_properties) = parquet_opts.crypto.file_encryption {
+    if let Some(file_encryption_properties) = &parquet_opts.crypto.file_encryption {
         // Encryption properties have been specified directly
-        return Ok(builder.with_file_encryption_properties(Arc::new(
-            FileEncryptionProperties::from(file_encryption_properties),
-        )));
+        return Ok(builder
+            .with_file_encryption_properties(file_encryption_properties.clone().into()));
     } else if let Some(encryption_factory_id) = &parquet_opts.crypto.factory_id.as_ref() {
         // Encryption properties will be generated by an encryption factory
         let encryption_factory =
@@ -1220,7 +1221,7 @@ async fn set_writer_encryption_properties(
 async fn set_writer_encryption_properties(
     builder: WriterPropertiesBuilder,
     _runtime: &Arc<RuntimeEnv>,
-    _parquet_opts: TableParquetOptions,
+    _parquet_opts: &TableParquetOptions,
     _schema: &Arc<Schema>,
     _path: &Path,
 ) -> Result<WriterPropertiesBuilder> {
@@ -1243,7 +1244,7 @@ impl FileSink for ParquetSink {
         let parquet_opts = &self.parquet_options;
 
         let mut file_write_tasks: JoinSet<
-            std::result::Result<(Path, ParquetMetaData), DataFusionError>,
+            std::result::Result<(Path, FileMetaData), DataFusionError>,
         > = JoinSet::new();
 
         let runtime = context.runtime_env();
@@ -1274,11 +1275,11 @@ impl FileSink for ParquetSink {
                         writer.write(&batch).await?;
                         reservation.try_resize(writer.memory_size())?;
                     }
-                    let parquet_meta_data = writer
+                    let file_metadata = writer
                         .close()
                         .await
                         .map_err(|e| DataFusionError::ParquetError(Box::new(e)))?;
-                    Ok((path, parquet_meta_data))
+                    Ok((path, file_metadata))
                 });
             } else {
                 let writer = ObjectWriterBuilder::new(
@@ -1302,7 +1303,7 @@ impl FileSink for ParquetSink {
                 let parallel_options_clone = parallel_options.clone();
                 let pool = Arc::clone(context.memory_pool());
                 file_write_tasks.spawn(async move {
-                    let parquet_meta_data = output_single_parquet_file_parallelized(
+                    let file_metadata = output_single_parquet_file_parallelized(
                         writer,
                         rx,
                         schema,
@@ -1312,7 +1313,7 @@ impl FileSink for ParquetSink {
                         pool,
                     )
                     .await?;
-                    Ok((path, parquet_meta_data))
+                    Ok((path, file_metadata))
                 });
             }
         }
@@ -1321,11 +1322,11 @@ impl FileSink for ParquetSink {
         while let Some(result) = file_write_tasks.join_next().await {
             match result {
                 Ok(r) => {
-                    let (path, parquet_meta_data) = r?;
-                    row_count += parquet_meta_data.file_metadata().num_rows();
+                    let (path, file_metadata) = r?;
+                    row_count += file_metadata.num_rows;
                     let mut written_files = self.written.lock();
                     written_files
-                        .try_insert(path.clone(), parquet_meta_data)
+                        .try_insert(path.clone(), file_metadata)
                         .map_err(|e| internal_datafusion_err!("duplicate entry detected for partitioned file {path}: {e}"))?;
                     drop(written_files);
                 }
@@ -1588,7 +1589,7 @@ async fn concatenate_parallel_row_groups(
     mut serialize_rx: Receiver<SpawnedTask<RBStreamSerializeResult>>,
     mut object_store_writer: Box<dyn AsyncWrite + Send + Unpin>,
     pool: Arc<dyn MemoryPool>,
-) -> Result<ParquetMetaData> {
+) -> Result<FileMetaData> {
     let mut file_reservation =
         MemoryConsumer::new("ParquetSink(SerializedFileWriter)").register(&pool);
 
@@ -1616,14 +1617,14 @@ async fn concatenate_parallel_row_groups(
         rg_out.close()?;
     }
 
-    let parquet_meta_data = parquet_writer.close()?;
+    let file_metadata = parquet_writer.close()?;
     let final_buff = merged_buff.buffer.try_lock().unwrap();
 
     object_store_writer.write_all(final_buff.as_slice()).await?;
     object_store_writer.shutdown().await?;
     file_reservation.free();
 
-    Ok(parquet_meta_data)
+    Ok(file_metadata)
 }
 
 /// Parallelizes the serialization of a single parquet file, by first serializing N
@@ -1638,7 +1639,7 @@ async fn output_single_parquet_file_parallelized(
     skip_arrow_metadata: bool,
     parallel_options: ParallelParquetWriterOptions,
     pool: Arc<dyn MemoryPool>,
-) -> Result<ParquetMetaData> {
+) -> Result<FileMetaData> {
     let max_rowgroups = parallel_options.max_parallel_row_groups;
     // Buffer size of this channel limits maximum number of RowGroups being worked on in parallel
     let (serialize_tx, serialize_rx) =
@@ -1665,7 +1666,7 @@ async fn output_single_parquet_file_parallelized(
         parallel_options,
         Arc::clone(&pool),
     );
-    let parquet_meta_data = concatenate_parallel_row_groups(
+    let file_metadata = concatenate_parallel_row_groups(
         writer,
         merged_buff,
         serialize_rx,
@@ -1678,7 +1679,7 @@ async fn output_single_parquet_file_parallelized(
         .join_unwind()
         .await
         .map_err(|e| DataFusionError::ExecutionJoin(Box::new(e)))??;
-    Ok(parquet_meta_data)
+    Ok(file_metadata)
 }
 
 #[cfg(test)]

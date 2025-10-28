@@ -21,10 +21,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::vec;
 
-use crate::utils::make_decimal_type;
 use arrow::datatypes::*;
 use datafusion_common::config::SqlParserOptions;
-use datafusion_common::datatype::{DataTypeExt, FieldExt};
 use datafusion_common::error::add_possible_columns_to_diag;
 use datafusion_common::TableReference;
 use datafusion_common::{
@@ -33,12 +31,14 @@ use datafusion_common::{
 };
 use datafusion_common::{not_impl_err, plan_err, DFSchema, DataFusionError, Result};
 use datafusion_expr::logical_plan::{LogicalPlan, LogicalPlanBuilder};
-pub use datafusion_expr::planner::ContextProvider;
 use datafusion_expr::utils::find_column_exprs;
 use datafusion_expr::{col, Expr};
 use sqlparser::ast::{ArrayElemTypeDef, ExactNumberInfo, TimezoneInfo};
 use sqlparser::ast::{ColumnDef as SQLColumnDef, ColumnOption};
 use sqlparser::ast::{DataType as SQLDataType, Ident, ObjectName, TableAlias};
+
+use crate::utils::make_decimal_type;
+pub use datafusion_expr::planner::ContextProvider;
 
 /// SQL parser options
 #[derive(Debug, Clone, Copy)]
@@ -256,7 +256,7 @@ impl IdentNormalizer {
 pub struct PlannerContext {
     /// Data types for numbered parameters ($1, $2, etc), if supplied
     /// in `PREPARE` statement
-    prepare_param_data_types: Arc<Vec<FieldRef>>,
+    prepare_param_data_types: Arc<Vec<DataType>>,
     /// Map of CTE name to logical plan of the WITH clause.
     /// Use `Arc<LogicalPlan>` to allow cheap cloning
     ctes: HashMap<String, Arc<LogicalPlan>>,
@@ -290,7 +290,7 @@ impl PlannerContext {
     /// Update the PlannerContext with provided prepare_param_data_types
     pub fn with_prepare_param_data_types(
         mut self,
-        prepare_param_data_types: Vec<FieldRef>,
+        prepare_param_data_types: Vec<DataType>,
     ) -> Self {
         self.prepare_param_data_types = prepare_param_data_types.into();
         self
@@ -347,7 +347,7 @@ impl PlannerContext {
     }
 
     /// Return the types of parameters (`$1`, `$2`, etc) if known
-    pub fn prepare_param_data_types(&self) -> &[FieldRef] {
+    pub fn prepare_param_data_types(&self) -> &[DataType] {
         &self.prepare_param_data_types
     }
 
@@ -428,18 +428,16 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         let mut fields = Vec::with_capacity(columns.len());
 
         for column in columns {
-            let data_type = self.convert_data_type_to_field(&column.data_type)?;
+            let data_type = self.convert_data_type(&column.data_type)?;
             let not_nullable = column
                 .options
                 .iter()
                 .any(|x| x.option == ColumnOption::NotNull);
-            fields.push(
-                data_type
-                    .as_ref()
-                    .clone()
-                    .with_name(self.ident_normalizer.normalize(column.name))
-                    .with_nullable(!not_nullable),
-            );
+            fields.push(Field::new(
+                self.ident_normalizer.normalize(column.name),
+                data_type,
+                !not_nullable,
+            ));
         }
 
         Ok(Schema::new(fields))
@@ -589,14 +587,11 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             })
     }
 
-    pub(crate) fn convert_data_type_to_field(
-        &self,
-        sql_type: &SQLDataType,
-    ) -> Result<FieldRef> {
+    pub(crate) fn convert_data_type(&self, sql_type: &SQLDataType) -> Result<DataType> {
         // First check if any of the registered type_planner can handle this type
         if let Some(type_planner) = self.context_provider.get_type_planner() {
             if let Some(data_type) = type_planner.plan_type(sql_type)? {
-                return Ok(data_type.into_nullable_field_ref());
+                return Ok(data_type);
             }
         }
 
@@ -604,30 +599,28 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         match sql_type {
             SQLDataType::Array(ArrayElemTypeDef::AngleBracket(inner_sql_type)) => {
                 // Arrays may be multi-dimensional.
-                Ok(self.convert_data_type_to_field(inner_sql_type)?.into_list())
+                let inner_data_type = self.convert_data_type(inner_sql_type)?;
+                Ok(DataType::new_list(inner_data_type, true))
             }
             SQLDataType::Array(ArrayElemTypeDef::SquareBracket(
                 inner_sql_type,
                 maybe_array_size,
             )) => {
-                let inner_field = self.convert_data_type_to_field(inner_sql_type)?;
+                let inner_data_type = self.convert_data_type(inner_sql_type)?;
                 if let Some(array_size) = maybe_array_size {
-                    let array_size: i32 = (*array_size).try_into().map_err(|_| {
-                        plan_datafusion_err!(
-                            "Array size must be a positive 32 bit integer, got {array_size}"
-                        )
-                    })?;
-                    Ok(inner_field.into_fixed_size_list(array_size))
+                    Ok(DataType::new_fixed_size_list(
+                        inner_data_type,
+                        *array_size as i32,
+                        true,
+                    ))
                 } else {
-                    Ok(inner_field.into_list())
+                    Ok(DataType::new_list(inner_data_type, true))
                 }
             }
             SQLDataType::Array(ArrayElemTypeDef::None) => {
                 not_impl_err!("Arrays with unspecified type is not supported")
             }
-            other => Ok(self
-                .convert_simple_data_type(other)?
-                .into_nullable_field_ref()),
+            other => self.convert_simple_data_type(other),
         }
     }
 
@@ -740,13 +733,17 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 let fields = fields
                     .iter()
                     .enumerate()
-                    .map(|(idx, sql_struct_field)| {
-                        let field = self.convert_data_type_to_field(&sql_struct_field.field_type)?;
-                        let field_name = match &sql_struct_field.field_name {
+                    .map(|(idx, field)| {
+                        let data_type = self.convert_data_type(&field.field_type)?;
+                        let field_name = match &field.field_name {
                             Some(ident) => ident.clone(),
                             None => Ident::new(format!("c{idx}")),
                         };
-                        Ok(field.as_ref().clone().with_name(self.ident_normalizer.normalize(field_name)))
+                        Ok(Arc::new(Field::new(
+                            self.ident_normalizer.normalize(field_name),
+                            data_type,
+                            true,
+                        )))
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Ok(DataType::Struct(Fields::from(fields)))

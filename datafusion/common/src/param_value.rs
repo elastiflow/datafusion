@@ -16,37 +16,22 @@
 // under the License.
 
 use crate::error::{_plan_datafusion_err, _plan_err};
-use crate::metadata::{check_metadata_with_storage_equal, ScalarAndMetadata};
 use crate::{Result, ScalarValue};
-use arrow::datatypes::{DataType, Field, FieldRef};
+use arrow::datatypes::DataType;
 use std::collections::HashMap;
 
 /// The parameter value corresponding to the placeholder
 #[derive(Debug, Clone)]
 pub enum ParamValues {
     /// For positional query parameters, like `SELECT * FROM test WHERE a > $1 AND b = $2`
-    List(Vec<ScalarAndMetadata>),
+    List(Vec<ScalarValue>),
     /// For named query parameters, like `SELECT * FROM test WHERE a > $foo AND b = $goo`
-    Map(HashMap<String, ScalarAndMetadata>),
+    Map(HashMap<String, ScalarValue>),
 }
 
 impl ParamValues {
-    /// Verify parameter list length and DataType
-    ///
-    /// Use [`ParamValues::verify_fields`] to ensure field metadata is considered when
-    /// computing type equality.
-    #[deprecated(since = "51.0.0", note = "Use verify_fields instead")]
-    pub fn verify(&self, expect: &[DataType]) -> Result<()> {
-        // make dummy Fields
-        let expect = expect
-            .iter()
-            .map(|dt| Field::new("", dt.clone(), true).into())
-            .collect::<Vec<_>>();
-        self.verify_fields(&expect)
-    }
-
     /// Verify parameter list length and type
-    pub fn verify_fields(&self, expect: &[FieldRef]) -> Result<()> {
+    pub fn verify(&self, expect: &[DataType]) -> Result<()> {
         match self {
             ParamValues::List(list) => {
                 // Verify if the number of params matches the number of values
@@ -60,16 +45,15 @@ impl ParamValues {
 
                 // Verify if the types of the params matches the types of the values
                 let iter = expect.iter().zip(list.iter());
-                for (i, (param_type, lit)) in iter.enumerate() {
-                    check_metadata_with_storage_equal(
-                        (
-                            &lit.value.data_type(),
-                            lit.metadata.as_ref().map(|m| m.to_hashmap()).as_ref(),
-                        ),
-                        (param_type.data_type(), Some(param_type.metadata())),
-                        "parameter",
-                        &format!(" at index {i}"),
-                    )?;
+                for (i, (param_type, value)) in iter.enumerate() {
+                    if *param_type != value.data_type() {
+                        return _plan_err!(
+                            "Expected parameter of type {}, got {:?} at index {}",
+                            param_type,
+                            value.data_type(),
+                            i
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -81,7 +65,7 @@ impl ParamValues {
         }
     }
 
-    pub fn get_placeholders_with_values(&self, id: &str) -> Result<ScalarAndMetadata> {
+    pub fn get_placeholders_with_values(&self, id: &str) -> Result<ScalarValue> {
         match self {
             ParamValues::List(list) => {
                 if id.is_empty() {
@@ -115,7 +99,7 @@ impl ParamValues {
 
 impl From<Vec<ScalarValue>> for ParamValues {
     fn from(value: Vec<ScalarValue>) -> Self {
-        Self::List(value.into_iter().map(ScalarAndMetadata::from).collect())
+        Self::List(value)
     }
 }
 
@@ -124,10 +108,8 @@ where
     K: Into<String>,
 {
     fn from(value: Vec<(K, ScalarValue)>) -> Self {
-        let value: HashMap<String, ScalarAndMetadata> = value
-            .into_iter()
-            .map(|(k, v)| (k.into(), ScalarAndMetadata::from(v)))
-            .collect();
+        let value: HashMap<String, ScalarValue> =
+            value.into_iter().map(|(k, v)| (k.into(), v)).collect();
         Self::Map(value)
     }
 }
@@ -137,10 +119,8 @@ where
     K: Into<String>,
 {
     fn from(value: HashMap<K, ScalarValue>) -> Self {
-        let value: HashMap<String, ScalarAndMetadata> = value
-            .into_iter()
-            .map(|(k, v)| (k.into(), ScalarAndMetadata::from(v)))
-            .collect();
+        let value: HashMap<String, ScalarValue> =
+            value.into_iter().map(|(k, v)| (k.into(), v)).collect();
         Self::Map(value)
     }
 }

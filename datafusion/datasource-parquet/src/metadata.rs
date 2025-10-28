@@ -58,7 +58,7 @@ pub struct DFParquetMetadata<'a> {
     store: &'a dyn ObjectStore,
     object_meta: &'a ObjectMeta,
     metadata_size_hint: Option<usize>,
-    decryption_properties: Option<Arc<FileDecryptionProperties>>,
+    decryption_properties: Option<&'a FileDecryptionProperties>,
     file_metadata_cache: Option<Arc<dyn FileMetadataCache>>,
     /// timeunit to coerce INT96 timestamps to
     pub coerce_int96: Option<TimeUnit>,
@@ -85,7 +85,7 @@ impl<'a> DFParquetMetadata<'a> {
     /// set decryption properties
     pub fn with_decryption_properties(
         mut self,
-        decryption_properties: Option<Arc<FileDecryptionProperties>>,
+        decryption_properties: Option<&'a FileDecryptionProperties>,
     ) -> Self {
         self.decryption_properties = decryption_properties;
         self
@@ -145,8 +145,7 @@ impl<'a> DFParquetMetadata<'a> {
 
         #[cfg(feature = "parquet_encryption")]
         if let Some(decryption_properties) = decryption_properties {
-            reader = reader
-                .with_decryption_properties(Some(Arc::clone(decryption_properties)));
+            reader = reader.with_decryption_properties(Some(decryption_properties));
         }
 
         if cache_metadata && file_metadata_cache.is_some() {
@@ -300,6 +299,7 @@ impl<'a> DFParquetMetadata<'a> {
                             summarize_min_max_null_counts(
                                 &mut accumulators,
                                 idx,
+                                num_rows,
                                 &stats_converter,
                                 row_groups_metadata,
                             )
@@ -417,6 +417,7 @@ struct StatisticsAccumulators<'a> {
 fn summarize_min_max_null_counts(
     accumulators: &mut StatisticsAccumulators,
     arrow_schema_index: usize,
+    num_rows: usize,
     stats_converter: &StatisticsConverter,
     row_groups_metadata: &[RowGroupMetaData],
 ) -> Result<()> {
@@ -448,14 +449,11 @@ fn summarize_min_max_null_counts(
         );
     }
 
-    accumulators.null_counts_array[arrow_schema_index] = match sum(&null_counts) {
-        Some(null_count) => Precision::Exact(null_count as usize),
-        None => match null_counts.len() {
-            // If sum() returned None we either have no rows or all values are null
-            0 => Precision::Exact(0),
-            _ => Precision::Absent,
-        },
-    };
+    accumulators.null_counts_array[arrow_schema_index] =
+        Precision::Exact(match sum(&null_counts) {
+            Some(null_count) => null_count as usize,
+            None => num_rows,
+        });
 
     Ok(())
 }

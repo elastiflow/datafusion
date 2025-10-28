@@ -22,7 +22,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::object_storage::instrumented::{
-    InstrumentedObjectStoreMode, InstrumentedObjectStoreRegistry, RequestSummaries,
+    InstrumentedObjectStoreMode, InstrumentedObjectStoreRegistry, RequestSummary,
 };
 use crate::print_format::PrintFormat;
 
@@ -188,25 +188,27 @@ impl PrintOptions {
         if !self.quiet {
             writeln!(writer, "{formatted_exec_details}")?;
 
-            let instrument_mode = self.instrumented_registry.instrument_mode();
-            if instrument_mode != InstrumentedObjectStoreMode::Disabled {
+            if self.instrumented_registry.instrument_mode()
+                != InstrumentedObjectStoreMode::Disabled
+            {
                 writeln!(writer, "{OBJECT_STORE_PROFILING_HEADER}")?;
                 for store in self.instrumented_registry.stores() {
                     let requests = store.take_requests();
 
                     if !requests.is_empty() {
                         writeln!(writer, "{store}")?;
-                        if instrument_mode == InstrumentedObjectStoreMode::Trace {
-                            for req in requests.iter() {
-                                writeln!(writer, "{req}")?;
-                            }
-                            // Add an extra blank line to help visually organize the output
-                            writeln!(writer)?;
+                        for req in requests.iter() {
+                            writeln!(writer, "{req}")?;
                         }
+                        // Add an extra blank line to help visually organize the output
+                        writeln!(writer)?;
 
                         writeln!(writer, "Summaries:")?;
-                        let summaries = RequestSummaries::new(&requests);
-                        writeln!(writer, "{summaries}")?;
+                        let summaries = RequestSummary::summarize_by_operation(&requests);
+                        for (op, summary) in summaries {
+                            writeln!(writer, "{op:?}")?;
+                            writeln!(writer, "{summary}")?;
+                        }
                     }
                 }
             }
@@ -250,7 +252,7 @@ mod tests {
         print_output.clear();
         print_options
             .instrumented_registry
-            .set_instrument_mode(InstrumentedObjectStoreMode::Trace);
+            .set_instrument_mode(InstrumentedObjectStoreMode::Enabled);
         print_options.write_output(&mut print_output, exec_out.clone())?;
         let out_str: String = print_output
             .clone()
